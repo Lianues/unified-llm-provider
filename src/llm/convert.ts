@@ -145,6 +145,19 @@ function normalizeGeminiLikeRequest(raw: unknown): LLMRequest {
     }
 
     const record = value as Record<string, any>;
+
+    // 兼容 Gemini 原始 wire format 中的 snake_case 字段，转为 unified canonical 的 camelCase。
+    // 原因：normalizeGeminiLikeRequest 作为 Gemini → canonical 的解码入口，
+    // 后续所有 encoder（claude / openai-compatible / openai-responses）均访问
+    // tools[].functionDeclarations（camelCase），不加转换会导致 flatMap 产生 [undefined]
+    // 进而触发 "Cannot read properties of undefined (reading 'name')"。
+    // （注：JS 中 Array.prototype.flatMap 不会过滤 undefined，[1].flatMap(() => undefined) → [undefined]）
+    if (Array.isArray(record.function_declarations)) {
+      record.functionDeclarations = record.function_declarations;
+      delete record.function_declarations;
+    }
+
+    // functionCall.id → functionCall.callId（Gemini 3 模型中 functionCall 使用 id 字段）
     if (record.thoughtSignature) {
       record.thoughtSignatures = { ...(record.thoughtSignatures ?? {}), gemini: record.thoughtSignature };
       delete record.thoughtSignature;
