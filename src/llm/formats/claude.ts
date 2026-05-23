@@ -138,7 +138,7 @@ export class ClaudeFormat implements FormatAdapter {
 
     // tools 声明转换
     if (request.tools && request.tools.length > 0) {
-      const allDecls = request.tools.flatMap(t => t.functionDeclarations);
+      const allDecls = request.tools.flatMap(t => Array.isArray((t as any).functionDeclarations) ? (t as any).functionDeclarations : []);
       body.tools = allDecls.map(decl => ({
         name: decl.name,
         description: decl.description,

@@ -126,7 +126,7 @@ export class OpenAIResponsesFormat implements FormatAdapter {
 
     // 3. tools
     if (request.tools && request.tools.length > 0) {
-      body.tools = request.tools.flatMap(t => t.functionDeclarations).map(decl => ({
+      body.tools = request.tools.flatMap(t => Array.isArray((t as any).functionDeclarations) ? (t as any).functionDeclarations : []).map(decl => ({
         type: 'function',
         name: decl.name,
         description: decl.description,

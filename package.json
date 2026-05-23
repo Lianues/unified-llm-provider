@@ -1,7 +1,7 @@
 {
-  "name": "unified-llm-interface",
+  "name": "unified-llm-provider",
   "version": "0.1.0",
-  "description": "统一 LLM 接口 npm 包：一套 Gemini-like 结构接入 Gemini / Claude / OpenAI Compatible / OpenAI Responses / DeepSeek",
+  "description": "统一 LLM Provider npm 包：一套统一结构接入 Gemini / Claude / OpenAI Compatible / OpenAI Responses / DeepSeek",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -25,8 +25,17 @@
     "typecheck": "npx tsc -p tsconfig.json --noEmit",
     "test": "npx vitest run"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lianues/unified-llm-provider.git"
+  },
+  "homepage": "https://github.com/Lianues/unified-llm-provider#readme",
+  "bugs": {
+    "url": "https://github.com/Lianues/unified-llm-provider/issues"
+  },
   "keywords": [
     "llm",
+    "provider",
     "gemini",
     "claude",
     "openai",

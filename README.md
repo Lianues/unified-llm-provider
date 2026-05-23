@@ -1,4 +1,4 @@
-# unified-llm-interface
+# unified-llm-provider
 
 统一 LLM 接口 npm 包。
 
@@ -121,7 +121,7 @@ const request = {
 ## 安装
 
 ```bash
-npm install unified-llm-interface
+npm install unified-llm-provider
 ```
 
 ---
@@ -135,7 +135,7 @@ npm install unified-llm-interface
 把一个请求体从 A 格式转成 B 格式。
 
 ```ts
-import { convertRequest } from 'unified-llm-interface';
+import { convertRequest } from 'unified-llm-provider';
 
 const claudeRequest = convertRequest({
   contents: [
@@ -171,7 +171,7 @@ const claudeRequest = convertRequest({
 把一个响应体从 A 格式转成 B 格式。
 
 ```ts
-import { convertResponse } from 'unified-llm-interface';
+import { convertResponse } from 'unified-llm-provider';
 
 const unifiedResponse = convertResponse({
   content: [
@@ -198,7 +198,7 @@ thoughtSignature: 'claude:sig_resp_1'
 把流式 chunk / event 从一种格式转成另一种格式。
 
 ```ts
-import { createStreamConverter } from 'unified-llm-interface';
+import { createStreamConverter } from 'unified-llm-provider';
 
 const converter = createStreamConverter({
   from: 'claude',
@@ -225,7 +225,7 @@ const chunk = converter.convert({
 - 输出要回 `unified`
 
 ```ts
-import { createClaudeProvider } from 'unified-llm-interface';
+import { createClaudeProvider } from 'unified-llm-provider';
 
 const provider = createClaudeProvider({
   provider: 'claude',
@@ -265,7 +265,7 @@ openai-compatible request
 ### 创建内置注册表
 
 ```ts
-import { createBootstrapExtensionRegistry } from 'unified-llm-interface';
+import { createBootstrapExtensionRegistry } from 'unified-llm-provider';
 
 const registry = createBootstrapExtensionRegistry();
 ```
@@ -273,7 +273,7 @@ const registry = createBootstrapExtensionRegistry();
 ### 通过 factory 创建 provider
 
 ```ts
-import { createBootstrapExtensionRegistry, createLLMFromConfig } from 'unified-llm-interface';
+import { createBootstrapExtensionRegistry, createLLMFromConfig } from 'unified-llm-provider';
 
 const registry = createBootstrapExtensionRegistry();
 const provider = createLLMFromConfig({
@@ -308,7 +308,7 @@ const provider = createLLMFromConfig({
 ### 创建 router
 
 ```ts
-import { createBootstrapExtensionRegistry, createLLMRouter } from 'unified-llm-interface';
+import { createBootstrapExtensionRegistry, createLLMRouter } from 'unified-llm-provider';
 
 const registry = createBootstrapExtensionRegistry();
 

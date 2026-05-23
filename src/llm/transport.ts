@@ -95,7 +95,7 @@ export async function sendRequest(
   const effectiveTimeout = timeout ?? (stream ? (endpoint.streamTimeoutMs ?? DEFAULT_STREAM_TIMEOUT) : (endpoint.timeoutMs ?? DEFAULT_TIMEOUT));
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': endpoint.userAgent ?? 'unified-llm-interface',
+    'User-Agent': endpoint.userAgent ?? 'unified-llm-provider',
     ...endpoint.headers,
   };
 

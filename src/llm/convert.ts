@@ -149,6 +149,10 @@ function normalizeGeminiLikeRequest(raw: unknown): LLMRequest {
       record.thoughtSignatures = { ...(record.thoughtSignatures ?? {}), gemini: record.thoughtSignature };
       delete record.thoughtSignature;
     }
+    if (Array.isArray(record.function_declarations) && !Array.isArray(record.functionDeclarations)) {
+      record.functionDeclarations = record.function_declarations;
+      delete record.function_declarations;
+    }
     if (record.functionCall?.id && !record.functionCall.callId) {
       record.functionCall.callId = record.functionCall.id;
       delete record.functionCall.id;
