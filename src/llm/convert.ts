@@ -1,0 +1,1087 @@
+import type { LLMRequest, LLMResponse, LLMStreamChunk, Content, Part, FunctionDeclaration } from '../types/index.js';
+import { isTextPart } from '../types/index.js';
+import { normalizeCallId } from './formats/tool-call-ids.js';
+import { normalizeLLMRequestThoughtSignatures, normalizeLLMResponseThoughtSignatures, normalizeLLMStreamChunkThoughtSignatures, detectLLMRequestSignatureRepresentation } from '../signatures/normalize.js';
+import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignatures, serializeLLMStreamChunkThoughtSignatures } from '../signatures/serialize.js';
+import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
+
+export type UnifiedFormatId = 'unified';
+export type WireFormatId = 'gemini' | 'claude' | 'openai-compatible' | 'openai-responses' | 'deepseek';
+export type FormatId = UnifiedFormatId | WireFormatId | 'canonical' | 'gemini-like';
+export type UnifiedSignatureMode = 'string' | 'object' | 'preserve';
+
+export interface FormatTransformOptions extends FormatFactoryOptions {
+  registry?: Pick<FormatRegistry, 'get'>;
+  signatureMode?: UnifiedSignatureMode;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function resolveFormatRegistry(registry?: Pick<FormatRegistry, 'get'>): Pick<FormatRegistry, 'get'> {
+  return registry ?? createBuiltinFormatRegistry();
+}
+
+export function normalizeFormatId(format: FormatId): UnifiedFormatId | WireFormatId {
+  switch (format) {
+    case 'canonical':
+    case 'gemini-like':
+      return 'unified';
+    default:
+      return format;
+  }
+}
+
+function normalizeWireFormatId(format: WireFormatId): Exclude<WireFormatId, 'deepseek'> {
+  return format === 'deepseek' ? 'openai-compatible' : format;
+}
+
+export function getSignatureProviderForFormat(format: FormatId): string | undefined {
+  switch (normalizeFormatId(format)) {
+    case 'unified':
+    case 'gemini':
+      return 'gemini';
+    case 'claude':
+      return 'claude';
+    case 'openai-compatible':
+      return 'openai-compatible';
+    case 'openai-responses':
+      return 'openai-responses';
+    case 'deepseek':
+      return 'openai-compatible';
+    default:
+      return undefined;
+  }
+}
+
+function createAdapter(
+  format: WireFormatId,
+  registry: Pick<FormatRegistry, 'get'>,
+  options?: FormatFactoryOptions,
+) {
+  const normalized = normalizeWireFormatId(format);
+  const factory = registry.get(normalized);
+  if (!factory) {
+    throw new Error(`未注册的 format: ${format}`);
+  }
+  return factory(options);
+}
+
+function parseJSONValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (isPlainObject(value)) return value;
+  if (Array.isArray(value)) return { items: value };
+  if (typeof value === 'string') return { content: value };
+  if (value === undefined) return {};
+  return { value };
+}
+
+function parseDataUrl(value: unknown): { mimeType: string; data: string } | undefined {
+  if (typeof value !== 'string') return undefined;
+  const matched = /^data:([^;,]+);base64,(.*)$/s.exec(value);
+  if (!matched) return undefined;
+  return {
+    mimeType: matched[1],
+    data: matched[2],
+  };
+}
+
+function parseOpenAIContentBlocks(blocks: unknown): Part[] {
+  if (!Array.isArray(blocks)) return [];
+  const parts: Part[] = [];
+  for (const block of blocks) {
+    if (typeof block === 'string') {
+      parts.push({ text: block });
+      continue;
+    }
+    if (!block || typeof block !== 'object') continue;
+    const item = block as any;
+    if (item.type === 'text' && typeof item.text === 'string') {
+      parts.push({ text: item.text });
+    } else if (item.type === 'image_url') {
+      const inlineData = parseDataUrl(item.image_url?.url);
+      if (inlineData) parts.push({ inlineData });
+    }
+  }
+  return parts;
+}
+
+function parseOpenAIResponsesUserBlocks(blocks: unknown): Part[] {
+  if (!Array.isArray(blocks)) return [];
+  const parts: Part[] = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    const item = block as any;
+    if ((item.type === 'input_text' || item.type === 'output_text') && typeof item.text === 'string') {
+      parts.push({ text: item.text });
+    } else if (item.type === 'input_image') {
+      const inlineData = parseDataUrl(item.image_url);
+      if (inlineData) parts.push({ inlineData });
+    } else if (item.type === 'input_file') {
+      const inlineData = parseDataUrl(item.file_data);
+      if (inlineData) parts.push({ inlineData });
+    }
+  }
+  return parts;
+}
+
+function normalizeGeminiLikeRequest(raw: unknown): LLMRequest {
+  const cloned = structuredClone(raw as Record<string, unknown>) as Record<string, any>;
+
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+
+    const record = value as Record<string, any>;
+    if (record.thoughtSignature) {
+      record.thoughtSignatures = { ...(record.thoughtSignatures ?? {}), gemini: record.thoughtSignature };
+      delete record.thoughtSignature;
+    }
+    if (record.functionCall?.id && !record.functionCall.callId) {
+      record.functionCall.callId = record.functionCall.id;
+      delete record.functionCall.id;
+    }
+    if (record.functionResponse?.id && !record.functionResponse.callId) {
+      record.functionResponse.callId = record.functionResponse.id;
+      delete record.functionResponse.id;
+    }
+
+    Object.values(record).forEach(visit);
+  };
+
+  visit(cloned);
+  return normalizeLLMRequestThoughtSignatures(cloned as unknown as LLMRequest, {
+    formatHint: 'gemini',
+  });
+}
+
+function decodeClaudeRequest(raw: unknown): LLMRequest {
+  const data = raw as any;
+  const contents: Content[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  const parseUserBlocks = (content: unknown): Part[] => {
+    if (typeof content === 'string') return content ? [{ text: content }] : [];
+    if (!Array.isArray(content)) return [];
+
+    const parts: Part[] = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const item = block as any;
+      if (item.type === 'text' && typeof item.text === 'string') {
+        parts.push({ text: item.text });
+      } else if (item.type === 'image' || item.type === 'document') {
+        const source = item.source;
+        if (source?.type === 'base64' && typeof source.media_type === 'string' && typeof source.data === 'string') {
+          parts.push({
+            inlineData: {
+              mimeType: source.media_type,
+              data: source.data,
+            },
+          });
+        }
+      } else if (item.type === 'tool_result') {
+        const callId = normalizeCallId(item.tool_use_id);
+        const name = (callId && toolNameByCallId.get(callId)) || String(item.name ?? 'unknown_tool');
+        parts.push({
+          functionResponse: {
+            name,
+            response: toRecord(parseJSONValue(item.content)),
+            callId,
+          },
+        });
+      }
+    }
+    return parts;
+  };
+
+  const parseAssistantBlocks = (content: unknown): Part[] => {
+    const blocks = typeof content === 'string'
+      ? [{ type: 'text', text: content }]
+      : Array.isArray(content)
+        ? content
+        : [];
+    const parts: Part[] = [];
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue;
+      const item = block as any;
+      if (item.type === 'text' && typeof item.text === 'string') {
+        parts.push({ text: item.text });
+      } else if (item.type === 'thinking') {
+        parts.push({
+          text: item.thinking || '',
+          thought: true,
+          thoughtSignatures: item.signature ? { claude: item.signature } : undefined,
+        });
+      } else if (item.type === 'tool_use') {
+        const callId = normalizeCallId(item.id);
+        if (callId && typeof item.name === 'string') {
+          toolNameByCallId.set(callId, item.name);
+        }
+        parts.push({
+          functionCall: {
+            name: String(item.name ?? ''),
+            args: isPlainObject(item.input) ? item.input : {},
+            callId,
+          },
+        });
+      }
+    }
+    return parts;
+  };
+
+  for (const message of Array.isArray(data.messages) ? data.messages : []) {
+    if (!message || typeof message !== 'object') continue;
+    if (message.role === 'assistant') {
+      const parts = parseAssistantBlocks(message.content);
+      if (parts.length > 0) contents.push({ role: 'model', parts });
+    } else if (message.role === 'user') {
+      const parts = parseUserBlocks(message.content);
+      if (parts.length > 0) contents.push({ role: 'user', parts });
+    }
+  }
+
+  const functionDeclarations: FunctionDeclaration[] = Array.isArray(data.tools)
+    ? data.tools
+        .filter((tool: any) => tool && typeof tool === 'object' && typeof tool.name === 'string')
+        .map((tool: any) => ({
+          name: tool.name,
+          description: String(tool.description ?? ''),
+          parameters: isPlainObject(tool.input_schema) ? tool.input_schema as any : undefined,
+        }))
+    : [];
+
+  const systemParts = Array.isArray(data.system)
+    ? data.system
+        .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part: any) => ({ text: part.text }))
+    : typeof data.system === 'string' && data.system
+      ? [{ text: data.system }]
+      : undefined;
+
+  return normalizeLLMRequestThoughtSignatures({
+    contents,
+    systemInstruction: systemParts ? { parts: systemParts } : undefined,
+    tools: functionDeclarations.length > 0 ? [{ functionDeclarations }] : undefined,
+    generationConfig: {
+      ...(typeof data.max_tokens === 'number' ? { maxOutputTokens: data.max_tokens } : {}),
+      ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
+      ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
+      ...(typeof data.top_k === 'number' ? { topK: data.top_k } : {}),
+    },
+  }, { formatHint: 'claude' });
+}
+
+function decodeOpenAICompatibleRequest(raw: unknown): LLMRequest {
+  const data = raw as any;
+  const contents: Content[] = [];
+  const systemParts: Part[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  for (const message of Array.isArray(data.messages) ? data.messages : []) {
+    if (!message || typeof message !== 'object') continue;
+    if (message.role === 'system') {
+      if (typeof message.content === 'string' && message.content) {
+        systemParts.push({ text: message.content });
+      } else if (Array.isArray(message.content)) {
+        systemParts.push(...parseOpenAIContentBlocks(message.content));
+      }
+      continue;
+    }
+
+    if (message.role === 'assistant') {
+      const parts: Part[] = [];
+      if ((typeof message.reasoning_content === 'string' && message.reasoning_content) || typeof message.reasoning_signature === 'string') {
+        parts.push({
+          text: typeof message.reasoning_content === 'string' ? message.reasoning_content : '',
+          thought: true,
+          ...(typeof message.reasoning_signature === 'string' ? { thoughtSignature: message.reasoning_signature } : {}),
+        } as any);
+      }
+      if (typeof message.content === 'string' && message.content) {
+        parts.push({ text: message.content });
+      } else if (Array.isArray(message.content)) {
+        parts.push(...parseOpenAIContentBlocks(message.content));
+      }
+      if (Array.isArray(message.tool_calls)) {
+        for (const toolCall of message.tool_calls) {
+          if (!toolCall?.function?.name) continue;
+          const callId = normalizeCallId(toolCall.id);
+          if (callId) toolNameByCallId.set(callId, toolCall.function.name);
+          parts.push({
+            functionCall: {
+              name: toolCall.function.name,
+              args: toRecord(parseJSONValue(toolCall.function.arguments)),
+              callId,
+            },
+          });
+        }
+      }
+      if (parts.length > 0) contents.push({ role: 'model', parts });
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      const callId = normalizeCallId(message.tool_call_id);
+      contents.push({
+        role: 'user',
+        parts: [{
+          functionResponse: {
+            name: (callId && toolNameByCallId.get(callId)) || String(message.name ?? 'unknown_tool'),
+            response: toRecord(parseJSONValue(message.content)),
+            callId,
+          },
+        }],
+      });
+      continue;
+    }
+
+    if (message.role === 'user') {
+      const parts: Part[] = typeof message.content === 'string'
+        ? (message.content ? [{ text: message.content }] : [])
+        : parseOpenAIContentBlocks(message.content);
+      if (parts.length > 0) contents.push({ role: 'user', parts });
+    }
+  }
+
+  const functionDeclarations: FunctionDeclaration[] = Array.isArray(data.tools)
+    ? data.tools
+        .filter((tool: any) => tool?.type === 'function' && tool.function?.name)
+        .map((tool: any) => ({
+          name: tool.function.name,
+          description: String(tool.function.description ?? ''),
+          parameters: isPlainObject(tool.function.parameters) ? tool.function.parameters as any : undefined,
+        }))
+    : [];
+
+  return normalizeLLMRequestThoughtSignatures({
+    contents,
+    systemInstruction: systemParts.length > 0 ? { parts: systemParts } : undefined,
+    tools: functionDeclarations.length > 0 ? [{ functionDeclarations }] : undefined,
+    generationConfig: {
+      ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
+      ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
+      ...(typeof data.max_tokens === 'number' ? { maxOutputTokens: data.max_tokens } : {}),
+      ...(Array.isArray(data.stop) ? { stopSequences: data.stop } : {}),
+    },
+  }, { formatHint: 'openai-compatible' });
+}
+
+function decodeOpenAIResponsesRequest(raw: unknown): LLMRequest {
+  const data = raw as any;
+  const contents: Content[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  let pendingModelParts: Part[] = [];
+  let pendingUserParts: Part[] = [];
+
+  const flushModel = () => {
+    if (pendingModelParts.length === 0) return;
+    contents.push({ role: 'model', parts: pendingModelParts });
+    pendingModelParts = [];
+  };
+
+  const flushUser = () => {
+    if (pendingUserParts.length === 0) return;
+    contents.push({ role: 'user', parts: pendingUserParts });
+    pendingUserParts = [];
+  };
+
+  for (const item of Array.isArray(data.input) ? data.input : []) {
+    if (!item || typeof item !== 'object') continue;
+
+    if (item.type === 'reasoning') {
+      flushUser();
+      pendingModelParts.push({
+        text: Array.isArray(item.summary)
+          ? item.summary.map((part: any) => String(part?.text ?? part?.summary_text ?? '')).filter(Boolean).join('\n')
+          : '',
+        thought: true,
+        thoughtSignatures: typeof item.encrypted_content === 'string'
+          ? { 'openai-responses': item.encrypted_content }
+          : undefined,
+      });
+      continue;
+    }
+
+    if (item.type === 'message' && item.role === 'assistant') {
+      flushUser();
+      pendingModelParts.push(...parseOpenAIResponsesUserBlocks(item.content));
+      continue;
+    }
+
+    if (item.type === 'function_call') {
+      flushUser();
+      const callId = normalizeCallId(item.call_id) ?? normalizeCallId(item.id);
+      if (callId && typeof item.name === 'string') {
+        toolNameByCallId.set(callId, item.name);
+      }
+      pendingModelParts.push({
+        functionCall: {
+          name: String(item.name ?? ''),
+          args: toRecord(parseJSONValue(item.arguments)),
+          callId,
+        },
+      });
+      continue;
+    }
+
+    if (item.type === 'function_call_output') {
+      flushModel();
+      const callId = normalizeCallId(item.call_id);
+      pendingUserParts.push({
+        functionResponse: {
+          name: (callId && toolNameByCallId.get(callId)) || String(item.name ?? 'unknown_tool'),
+          response: toRecord(parseJSONValue(item.output)),
+          callId,
+        },
+      });
+      continue;
+    }
+
+    if (item.role === 'user') {
+      flushModel();
+      pendingUserParts.push(...parseOpenAIResponsesUserBlocks(item.content));
+    }
+  }
+
+  flushModel();
+  flushUser();
+
+  const functionDeclarations: FunctionDeclaration[] = Array.isArray(data.tools)
+    ? data.tools
+        .filter((tool: any) => tool?.type === 'function' && tool.name)
+        .map((tool: any) => ({
+          name: tool.name,
+          description: String(tool.description ?? ''),
+          parameters: isPlainObject(tool.parameters) ? tool.parameters as any : undefined,
+        }))
+    : [];
+
+  return normalizeLLMRequestThoughtSignatures({
+    contents,
+    systemInstruction: typeof data.instructions === 'string' && data.instructions
+      ? { parts: [{ text: data.instructions }] }
+      : undefined,
+    tools: functionDeclarations.length > 0 ? [{ functionDeclarations }] : undefined,
+    generationConfig: {
+      ...(typeof data.max_output_tokens === 'number' ? { maxOutputTokens: data.max_output_tokens } : {}),
+      ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
+      ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
+    },
+  }, { formatHint: 'openai-responses' });
+}
+
+export interface DecodeRequestFromFormatOptions extends FormatFactoryOptions {
+  format: FormatId;
+  registry?: Pick<FormatRegistry, 'get'>;
+}
+
+export function decodeRequestFromFormat(raw: unknown, options: DecodeRequestFromFormatOptions): LLMRequest {
+  const format = normalizeFormatId(options.format);
+  switch (format) {
+    case 'unified':
+      return normalizeLLMRequestThoughtSignatures(raw as LLMRequest, {
+        formatHint: getSignatureProviderForFormat('unified'),
+      });
+    case 'gemini':
+      return normalizeGeminiLikeRequest(raw);
+    case 'claude':
+      return decodeClaudeRequest(raw);
+    case 'openai-compatible':
+    case 'deepseek':
+      return decodeOpenAICompatibleRequest(raw);
+    case 'openai-responses':
+      return decodeOpenAIResponsesRequest(raw);
+    default:
+      throw new Error(`不支持的请求格式: ${String(options.format)}`);
+  }
+}
+
+function mapUsageToClaude(usage: LLMResponse['usageMetadata']): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  return {
+    input_tokens: usage.promptTokenCount ?? 0,
+    cache_read_input_tokens: usage.cachedContentTokenCount ?? 0,
+    output_tokens: usage.candidatesTokenCount ?? 0,
+  };
+}
+
+function mapUsageToOpenAI(usage: LLMResponse['usageMetadata']): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  return {
+    prompt_tokens: usage.promptTokenCount ?? 0,
+    prompt_tokens_details: {
+      cached_tokens: usage.cachedContentTokenCount ?? 0,
+    },
+    completion_tokens: usage.candidatesTokenCount ?? 0,
+    total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
+  };
+}
+
+function mapUsageToOpenAIResponses(usage: LLMResponse['usageMetadata']): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  return {
+    input_tokens: usage.promptTokenCount ?? 0,
+    input_tokens_details: {
+      cached_tokens: usage.cachedContentTokenCount ?? 0,
+    },
+    output_tokens: usage.candidatesTokenCount ?? 0,
+    total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
+  };
+}
+
+function mapFinishReasonToClaude(reason?: string): string | undefined {
+  switch (reason) {
+    case 'STOP': return 'end_turn';
+    case 'TOOL_CALLS': return 'tool_use';
+    case 'MAX_TOKENS': return 'max_tokens';
+    default: return reason ? String(reason).toLowerCase() : undefined;
+  }
+}
+
+function mapFinishReasonToOpenAI(reason?: string): string | undefined {
+  switch (reason) {
+    case 'STOP': return 'stop';
+    case 'TOOL_CALLS': return 'tool_calls';
+    case 'MAX_TOKENS': return 'length';
+    default: return reason ? String(reason).toLowerCase() : undefined;
+  }
+}
+
+function normalizeUnifiedSignatureMode(mode: UnifiedSignatureMode | undefined): 'string' | 'object' | 'preserve' {
+  return mode ?? 'string';
+}
+
+export interface EncodeRequestToFormatOptions extends FormatTransformOptions {
+  format: FormatId;
+  sourceFormat?: FormatId;
+  stream?: boolean;
+}
+
+export function encodeRequestToFormat(request: LLMRequest, options: EncodeRequestToFormatOptions): unknown {
+  const format = normalizeFormatId(options.format);
+  const sourceFormat = options.sourceFormat ? normalizeFormatId(options.sourceFormat) : 'unified';
+  const normalizedRequest = normalizeLLMRequestThoughtSignatures(request, {
+    formatHint: getSignatureProviderForFormat(sourceFormat),
+  });
+
+  if (format === 'unified') {
+    const mode = normalizeUnifiedSignatureMode(options.signatureMode ?? (sourceFormat === 'unified'
+      ? (detectLLMRequestSignatureRepresentation(normalizedRequest) === 'object' ? 'object' : 'string')
+      : 'string'));
+    if (mode === 'preserve') return normalizedRequest;
+    return serializeLLMRequestThoughtSignatures(normalizedRequest, { mode });
+  }
+
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  return adapter.encodeRequest(normalizedRequest, options.stream);
+}
+
+function getSignatureEntries(value: unknown): Array<[string, string]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.entries(value)
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim().length > 0);
+}
+
+function pickSignatureEntry(value: unknown, preferProvider?: string): [string, string] | undefined {
+  const entries = getSignatureEntries(value);
+  if (entries.length === 0) return undefined;
+  if (preferProvider) {
+    const matched = entries.find(([provider]) => provider === preferProvider);
+    if (matched) return matched;
+  }
+  return entries[0];
+}
+
+function buildPortableSignature(value: unknown, preferProvider?: string): string | undefined {
+  const selected = pickSignatureEntry(value, preferProvider);
+  return selected ? `${selected[0]}:${selected[1]}` : undefined;
+}
+
+function getSignatureSlotProviderForFormat(format: Exclude<WireFormatId, 'deepseek'>): string | undefined {
+  switch (format) {
+    case 'gemini': return 'gemini';
+    case 'claude': return 'claude';
+    case 'openai-compatible': return 'openai-compatible';
+    case 'openai-responses': return 'openai-responses';
+    default: return undefined;
+  }
+}
+
+function remapPartSignaturesForTargetFormat(part: Part, format: Exclude<WireFormatId, 'deepseek'>, preferProvider?: string): Part {
+  if (!isTextPart(part)) return part;
+  const slotProvider = getSignatureSlotProviderForFormat(format);
+  const portableSignature = buildPortableSignature((part as any).thoughtSignatures, preferProvider);
+  if (!slotProvider || !portableSignature) return part;
+
+  const cloned: any = { ...part };
+  delete cloned.thoughtSignature;
+  cloned.thoughtSignatures = { [slotProvider]: portableSignature };
+  return cloned;
+}
+
+function createSyntheticRequestFromResponse(response: LLMResponse, format: Exclude<WireFormatId, 'deepseek'>, preferProvider?: string): LLMRequest {
+  return {
+    contents: [{
+      ...response.content,
+      parts: response.content.parts.map(part => remapPartSignaturesForTargetFormat(part, format, preferProvider)),
+    }],
+  };
+}
+
+function extractPortableSignatureFromParts(parts: Part[], preferProvider?: string): string | undefined {
+  for (const part of parts) {
+    if (!isTextPart(part)) continue;
+    const portable = buildPortableSignature((part as any).thoughtSignatures, preferProvider);
+    if (portable) return portable;
+  }
+  return undefined;
+}
+
+function extractPortableSignatureFromChunk(chunk: LLMStreamChunk, preferProvider?: string): string | undefined {
+  return extractPortableSignatureFromParts(chunk.partsDelta ?? [], preferProvider) ?? buildPortableSignature(chunk.thoughtSignatures, preferProvider);
+}
+
+export interface DecodeResponseFromFormatOptions extends FormatFactoryOptions {
+  format: FormatId;
+  registry?: Pick<FormatRegistry, 'get'>;
+  signatureMode?: UnifiedSignatureMode;
+}
+
+export function decodeResponseFromFormat(raw: unknown, options: DecodeResponseFromFormatOptions): LLMResponse {
+  const format = normalizeFormatId(options.format);
+  if (format === 'unified') {
+    return normalizeLLMResponseThoughtSignatures(raw as LLMResponse, {
+      formatHint: getSignatureProviderForFormat('unified'),
+    });
+  }
+
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  const normalized = normalizeLLMResponseThoughtSignatures(adapter.decodeResponse(raw), {
+    formatHint: getSignatureProviderForFormat(format),
+  });
+  const mode = options.signatureMode ?? 'string';
+  if (mode === 'preserve') {
+    return normalized;
+  }
+  return serializeLLMResponseThoughtSignatures(normalized, {
+    mode,
+  });
+}
+
+export interface EncodeResponseToFormatOptions extends FormatTransformOptions {
+  format: FormatId;
+  sourceFormat?: FormatId;
+}
+
+export function encodeResponseToFormat(response: LLMResponse, options: EncodeResponseToFormatOptions): unknown {
+  const format = normalizeFormatId(options.format);
+  const sourceFormat = options.sourceFormat ? normalizeFormatId(options.sourceFormat) : 'unified';
+  const normalizedResponse = normalizeLLMResponseThoughtSignatures(response, {
+    formatHint: getSignatureProviderForFormat(sourceFormat),
+  });
+
+  if (format === 'unified') {
+    const mode = normalizeUnifiedSignatureMode(options.signatureMode ?? 'string');
+    if (mode === 'preserve') return normalizedResponse;
+    return serializeLLMResponseThoughtSignatures(normalizedResponse, { mode });
+  }
+
+  const wireFormat = normalizeWireFormatId(format);
+  const preferProvider = getSignatureProviderForFormat(sourceFormat);
+  const portableSignature = extractPortableSignatureFromParts(normalizedResponse.content.parts, preferProvider);
+  const syntheticRequest = createSyntheticRequestFromResponse(normalizedResponse, wireFormat, preferProvider);
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  const encoded = adapter.encodeRequest(syntheticRequest, false) as any;
+
+  switch (wireFormat) {
+    case 'gemini':
+      return {
+        candidates: [{
+          content: encoded.contents?.[0] ?? { role: 'model', parts: [{ text: '' }] },
+          finishReason: normalizedResponse.finishReason,
+        }],
+        usageMetadata: normalizedResponse.usageMetadata,
+      };
+    case 'claude': {
+      const assistantMessage = Array.isArray(encoded.messages)
+        ? encoded.messages.find((message: any) => message.role === 'assistant')
+        : undefined;
+      return {
+        content: assistantMessage?.content ?? [],
+        stop_reason: mapFinishReasonToClaude(normalizedResponse.finishReason),
+        usage: mapUsageToClaude(normalizedResponse.usageMetadata),
+      };
+    }
+    case 'openai-compatible': {
+      const assistantMessage = Array.isArray(encoded.messages)
+        ? encoded.messages.find((message: any) => message.role === 'assistant')
+        : undefined;
+      const responseMessage = assistantMessage
+        ? {
+            ...assistantMessage,
+            ...(portableSignature ? { reasoning_signature: portableSignature } : {}),
+          }
+        : { role: 'assistant', content: '', ...(portableSignature ? { reasoning_signature: portableSignature } : {}) };
+      return {
+        choices: [{
+          message: responseMessage,
+          finish_reason: mapFinishReasonToOpenAI(normalizedResponse.finishReason),
+        }],
+        usage: mapUsageToOpenAI(normalizedResponse.usageMetadata),
+      };
+    }
+    case 'openai-responses':
+      return {
+        output: encoded.input ?? [],
+        usage: mapUsageToOpenAIResponses(normalizedResponse.usageMetadata),
+      };
+    default:
+      throw new Error(`不支持的响应目标格式: ${format}`);
+  }
+}
+
+export interface ConvertRequestOptions extends FormatTransformOptions {
+  from: FormatId;
+  to: FormatId;
+  stream?: boolean;
+}
+
+export function convertRequest(raw: unknown, options: ConvertRequestOptions): unknown {
+  const canonical = decodeRequestFromFormat(raw, {
+    format: options.from,
+    registry: options.registry,
+    model: options.model,
+    promptCaching: options.promptCaching,
+    autoCaching: options.autoCaching,
+  });
+
+  return encodeRequestToFormat(canonical, {
+    format: options.to,
+    sourceFormat: options.from,
+    stream: options.stream,
+    registry: options.registry,
+    model: options.model,
+    promptCaching: options.promptCaching,
+    autoCaching: options.autoCaching,
+    signatureMode: options.signatureMode,
+  });
+}
+
+export interface ConvertResponseOptions extends FormatTransformOptions {
+  from: FormatId;
+  to: FormatId;
+}
+
+export function convertResponse(raw: unknown, options: ConvertResponseOptions): unknown {
+  const canonical = decodeResponseFromFormat(raw, {
+    format: options.from,
+    registry: options.registry,
+    model: options.model,
+    promptCaching: options.promptCaching,
+    autoCaching: options.autoCaching,
+  });
+
+  return encodeResponseToFormat(canonical, {
+    format: options.to,
+    sourceFormat: options.from,
+    registry: options.registry,
+    model: options.model,
+    promptCaching: options.promptCaching,
+    autoCaching: options.autoCaching,
+    signatureMode: options.signatureMode,
+  });
+}
+
+export interface DecodeStreamChunkFromFormatOptions extends FormatFactoryOptions {
+  format: FormatId;
+  registry?: Pick<FormatRegistry, 'get'>;
+  signatureMode?: UnifiedSignatureMode;
+}
+
+function prepareChunkForPortableTarget(
+  chunk: LLMStreamChunk,
+  format: Exclude<WireFormatId, 'deepseek'>,
+  preferProvider?: string,
+): LLMStreamChunk {
+  const slotProvider = getSignatureSlotProviderForFormat(format);
+  const portableSignature = extractPortableSignatureFromChunk(chunk, preferProvider);
+  const nextChunk: LLMStreamChunk = {
+    ...chunk,
+    partsDelta: chunk.partsDelta?.map(part => remapPartSignaturesForTargetFormat(part, format, preferProvider)),
+  };
+
+  if (slotProvider && portableSignature) {
+    nextChunk.thoughtSignatures = { [slotProvider]: portableSignature };
+    delete (nextChunk as any).thoughtSignature;
+
+    if (!nextChunk.partsDelta || nextChunk.partsDelta.length === 0) {
+      nextChunk.partsDelta = [{
+        thought: true,
+        thoughtSignatures: { [slotProvider]: portableSignature },
+      } as any];
+    }
+  }
+
+  return nextChunk;
+}
+
+function createGeminiStreamPayload(chunk: LLMStreamChunk): unknown {
+  const parts: Part[] = [...(chunk.partsDelta ?? [])];
+  if (chunk.textDelta && !parts.some(part => isTextPart(part) && part.text === chunk.textDelta)) {
+    parts.push({ text: chunk.textDelta });
+  }
+  return {
+    candidates: [{
+      content: parts.length > 0 ? { role: 'model', parts } : undefined,
+      ...(chunk.finishReason ? { finishReason: chunk.finishReason } : {}),
+    }],
+    ...(chunk.usageMetadata ? { usageMetadata: chunk.usageMetadata } : {}),
+  };
+}
+
+function createOpenAICompatibleStreamPayload(chunk: LLMStreamChunk, portableSignature?: string): unknown {
+  const delta: Record<string, unknown> = {};
+  const toolCalls = (chunk.functionCalls ?? []).map((call, index) => ({
+    index,
+    id: call.functionCall.callId,
+    type: 'function',
+    function: {
+      name: call.functionCall.name,
+      arguments: JSON.stringify(call.functionCall.args ?? {}),
+    },
+  }));
+
+  if (chunk.partsDelta) {
+    const reasoning = chunk.partsDelta
+      .filter((part): part is Part & { text?: string; thought: true } => isTextPart(part) && part.thought === true)
+      .map(part => part.text ?? '')
+      .join('');
+    if (reasoning) delta.reasoning_content = reasoning;
+  }
+  if (portableSignature) delta.reasoning_signature = portableSignature;
+  if (chunk.textDelta) delta.content = chunk.textDelta;
+  if (toolCalls.length > 0) delta.tool_calls = toolCalls;
+
+  return {
+    choices: [{
+      delta,
+      ...(chunk.finishReason ? { finish_reason: mapFinishReasonToOpenAI(chunk.finishReason) } : {}),
+    }],
+    ...(chunk.usageMetadata ? { usage: mapUsageToOpenAI(chunk.usageMetadata) } : {}),
+  };
+}
+
+function createClaudeStreamPayloads(chunk: LLMStreamChunk): unknown[] {
+  const payloads: unknown[] = [];
+
+  for (const part of chunk.partsDelta ?? []) {
+    if (isTextPart(part) && part.thought === true && part.text) {
+      payloads.push({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: part.text } });
+    } else if (isTextPart(part) && part.thought !== true && part.text) {
+      payloads.push({ type: 'content_block_delta', delta: { type: 'text_delta', text: part.text } });
+    } else if ('functionCall' in part) {
+      payloads.push({
+        type: 'content_block_start',
+        content_block: {
+          type: 'tool_use',
+          id: part.functionCall.callId,
+          name: part.functionCall.name,
+        },
+      });
+      payloads.push({
+        type: 'content_block_delta',
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify(part.functionCall.args ?? {}) },
+      });
+      payloads.push({ type: 'content_block_stop' });
+    }
+
+    if (isTextPart(part) && part.thoughtSignatures?.claude) {
+      payloads.push({ type: 'content_block_delta', delta: { type: 'signature_delta', signature: part.thoughtSignatures.claude } });
+    }
+  }
+
+  if (chunk.finishReason || chunk.usageMetadata) {
+    payloads.push({
+      type: 'message_delta',
+      ...(chunk.finishReason ? { delta: { stop_reason: mapFinishReasonToClaude(chunk.finishReason) } } : {}),
+      ...(chunk.usageMetadata ? { usage: { output_tokens: chunk.usageMetadata.candidatesTokenCount ?? 0 } } : {}),
+    });
+  }
+
+  return payloads;
+}
+
+function createOpenAIResponsesStreamPayloads(chunk: LLMStreamChunk): unknown[] {
+  const payloads: unknown[] = [];
+  let reasoningIndex = 0;
+
+  for (const part of chunk.partsDelta ?? []) {
+    if (isTextPart(part) && part.thought === true && part.text) {
+      payloads.push({
+        event: 'response.reasoning_summary_text.delta',
+        item_id: `reasoning_${reasoningIndex}`,
+        output_index: reasoningIndex,
+        delta: part.text,
+      });
+    } else if (isTextPart(part) && part.thought !== true && part.text) {
+      payloads.push({ event: 'response.output_text.delta', delta: part.text });
+    } else if ('functionCall' in part) {
+      payloads.push({
+        event: 'response.output_item.done',
+        item: {
+          id: part.functionCall.callId,
+          type: 'function_call',
+          call_id: part.functionCall.callId,
+          name: part.functionCall.name,
+          arguments: JSON.stringify(part.functionCall.args ?? {}),
+        },
+      });
+    }
+
+    if (isTextPart(part) && part.thoughtSignatures?.['openai-responses']) {
+      payloads.push({
+        event: 'response.output_item.done',
+        item: {
+          id: `reasoning_${reasoningIndex}`,
+          type: 'reasoning',
+          summary: [],
+          encrypted_content: part.thoughtSignatures['openai-responses'],
+        },
+      });
+      reasoningIndex += 1;
+    }
+  }
+
+  if (chunk.finishReason || chunk.usageMetadata) {
+    payloads.push({
+      event: 'response.completed',
+      usage: mapUsageToOpenAIResponses(chunk.usageMetadata),
+      response: {
+        output: [],
+        usage: mapUsageToOpenAIResponses(chunk.usageMetadata),
+      },
+    });
+  }
+
+  return payloads;
+}
+
+export interface EncodeStreamChunkToFormatOptions extends FormatTransformOptions {
+  format: FormatId;
+  sourceFormat?: FormatId;
+}
+
+export function encodeStreamChunkToFormat(chunk: LLMStreamChunk, options: EncodeStreamChunkToFormatOptions): unknown {
+  const format = normalizeFormatId(options.format);
+  const sourceFormat = options.sourceFormat ? normalizeFormatId(options.sourceFormat) : 'unified';
+  const normalizedChunk = normalizeLLMStreamChunkThoughtSignatures(chunk, {
+    formatHint: getSignatureProviderForFormat(sourceFormat),
+  });
+  const wireFormat = format === 'unified' ? undefined : normalizeWireFormatId(format);
+  const preferProvider = getSignatureProviderForFormat(sourceFormat);
+
+  if (format === 'unified') {
+    const mode = normalizeUnifiedSignatureMode(options.signatureMode ?? 'string');
+    if (mode === 'preserve') return normalizedChunk;
+    return serializeLLMStreamChunkThoughtSignatures(normalizedChunk, { mode });
+  }
+
+  const portableChunk = prepareChunkForPortableTarget(normalizedChunk, wireFormat!, preferProvider);
+  const portableSignature = extractPortableSignatureFromChunk(normalizedChunk, preferProvider);
+
+  switch (wireFormat) {
+    case 'gemini':
+      return createGeminiStreamPayload(portableChunk);
+    case 'openai-compatible':
+      return createOpenAICompatibleStreamPayload(normalizedChunk, portableSignature);
+    case 'claude':
+      return createClaudeStreamPayloads(portableChunk);
+    case 'openai-responses':
+      return createOpenAIResponsesStreamPayloads(portableChunk);
+    default:
+      throw new Error(`不支持的流式目标格式: ${format}`);
+  }
+}
+
+export interface StreamChunkDecoder {
+  decode(raw: unknown): LLMStreamChunk;
+}
+
+export function createStreamChunkDecoder(options: DecodeStreamChunkFromFormatOptions): StreamChunkDecoder {
+  const format = normalizeFormatId(options.format);
+  if (format === 'unified') {
+    return {
+      decode(raw: unknown): LLMStreamChunk {
+        return normalizeLLMStreamChunkThoughtSignatures(raw as LLMStreamChunk, {
+          formatHint: getSignatureProviderForFormat('unified'),
+        });
+      },
+    };
+  }
+
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  const state = adapter.createStreamState();
+
+  return {
+    decode(raw: unknown): LLMStreamChunk {
+      const normalized = normalizeLLMStreamChunkThoughtSignatures(adapter.decodeStreamChunk(raw, state), {
+        formatHint: getSignatureProviderForFormat(format),
+      });
+      const mode = options.signatureMode ?? 'string';
+      if (mode === 'preserve') {
+        return normalized;
+      }
+      return serializeLLMStreamChunkThoughtSignatures(normalized, {
+        mode,
+      });
+    },
+  };
+}
+
+export interface CreateStreamConverterOptions extends FormatTransformOptions {
+  from: FormatId;
+  to: FormatId;
+}
+
+export function createStreamConverter(options: CreateStreamConverterOptions): { convert(raw: unknown): unknown } {
+  const decoder = createStreamChunkDecoder({
+    format: options.from,
+    registry: options.registry,
+    model: options.model,
+    promptCaching: options.promptCaching,
+    autoCaching: options.autoCaching,
+  });
+
+  return {
+    convert(raw: unknown): unknown {
+      const chunk = decoder.decode(raw);
+      return encodeStreamChunkToFormat(chunk, {
+        format: options.to,
+        sourceFormat: options.from,
+        registry: options.registry,
+        model: options.model,
+        promptCaching: options.promptCaching,
+        autoCaching: options.autoCaching,
+        signatureMode: options.signatureMode,
+      });
+    },
+  };
+}
