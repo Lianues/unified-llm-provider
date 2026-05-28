@@ -16,9 +16,19 @@ export interface LLMResponseDebugEvent {
   error?: string;
 }
 
+export interface LLMStreamChunkDebugEvent {
+  url: string;
+  /** 本块原始文本 chunk */
+  chunk: string;
+  /** 当前累计已接收的完整文本 */
+  accumulated: string;
+}
+
 export interface LLMDebugHooks {
   onRequest?(event: LLMRequestDebugEvent): void | Promise<void>;
   onResponse?(event: LLMResponseDebugEvent): void | Promise<void>;
+  /** 流式响应每个 SSE chunk 的实时回调 */
+  onStreamChunk?(event: LLMStreamChunkDebugEvent): void | Promise<void>;
 }
 
 export interface LLMEndpointOverride {

@@ -422,6 +422,172 @@ thoughtSignatures: { claude: 'sig_xxx' }
 底层 `encode* / convert*` API 仍然保留 `signatureMode` 这样的高级参数，
 但正常使用时，你通常不需要碰它。
 
+## 调试与请求/响应日志
+
+这个包不会主动往终端打印任何内容。它只负责把数据通过回调或对象交给你，**显示到哪里完全由你决定**。
+
+---
+
+### 方式 1：trace 模式 — 数据存进对象，你自己取用
+
+```ts
+import { createTraceDebugHooks, type DebugTraceStore } from 'unified-llm-provider';
+
+const trace = {} as DebugTraceStore;
+
+const provider = createClaudeProvider({
+  provider: 'claude',
+  model: 'claude-sonnet-4',
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  debug: createTraceDebugHooks(trace),
+});
+
+await provider.chat({
+  contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+});
+
+// 现在 trace 对象里有你需要的一切
+console.log(trace.request!.curl);            // 完整的 curl 命令
+console.log(trace.response!.status);         // HTTP 状态码
+console.log(trace.response!.bodyText);       // 响应体文本
+console.log(trace.streamChunks);             // 流式 chunk 数组
+```
+
+---
+
+### 方式 2：file 模式 — 必须显式指定路径
+
+```ts
+import { createFileDebugHooks } from 'unified-llm-provider';
+
+const provider = createClaudeProvider({
+  // ...
+  debug: createFileDebugHooks('./logs/debug.log'),
+});
+
+// 也支持绝对路径
+debug: createFileDebugHooks('C:/LIANUE/logs/debug.log'),
+
+// 支持 ~ 展开为用户主目录
+debug: createFileDebugHooks('~/.iris/logs/debug.log'),
+```
+
+路径规则：
+- 相对路径：`./logs/debug.log`
+- 绝对路径：`C:/path/to/debug.log` 或 `/home/user/debug.log`
+- `~` 展开：`~/.iris/logs/debug.log` 会自动变成 `/home/用户名/.iris/logs/debug.log`
+
+每次请求会把 `curl` 命令和响应自动追加到这个文件里。
+
+
+### 方式 2.1：split 模式 — 请求和响应分两个文件，用时间戳关联
+
+如果想把请求和响应分成两个独立文件，用日期时间命名关联：
+
+```ts
+import { createSplitFileDebugHooks } from 'unified-llm-provider';
+
+const provider = createClaudeProvider({
+  // ...
+  debug: createSplitFileDebugHooks('./logs'),
+});
+```
+
+每次请求会在 `./logs/` 下生成两个文件：
+
+```text
+logs/
+  req_2026-05-23T08-30-15-123Z.log   ← 请求体
+  resp_2026-05-23T08-30-15-123Z.log  ← 响应体
+```
+
+两个文件共享同一个时间戳前缀，可以在文件管理器里自然排列在一起。
+
+同样支持 `~` 展开：
+
+```ts
+debug: createSplitFileDebugHooks('~/.iris/llm-logs'),
+```
+
+
+---
+
+### 方式 3：自定义 hooks — 完全自由
+
+```ts
+const provider = createClaudeProvider({
+  debug: {
+    onRequest(event) {
+      // url, headers, body
+      myLogger.info('LLM Request', event);
+    },
+    onResponse(event) {
+      // status, headers, bodyText, error?
+      if (event.error) {
+        myLogger.error('LLM Error', event);
+      } else {
+        myLogger.info('LLM Response', event);
+      }
+    },
+    onStreamChunk(event) {
+      // chunk, accumulated（实时流式回调）
+      myUI.appendStreamingText(event.chunk);
+    },
+  },
+});
+```
+
+---
+
+### 三个回调说明
+
+| 回调 | 触发时机 | 适用场景 |
+|---|---|---|
+| `onRequest` | 请求发出前 | 非流式 + 流式 |
+| `onResponse` | 非流式：拿到完整响应后 / 流式：全部 SSE 收完后 | 非流式 + 流式 |
+| `onStreamChunk` | 每个 SSE chunk 实时到达时 | 仅流式 |
+
+---
+
+### 辅助格式化工具
+
+这些工具也可以单独使用：
+
+```ts
+import {
+  formatRequestAsCurl,   // 把请求格式化成 curl 命令
+  formatResponseForLog,  // 把响应格式化成易读日志
+  bodyToCurlPayload,     // 把 body 格式化成 JSON
+} from 'unified-llm-provider';
+
+const curl = formatRequestAsCurl(
+  'https://api.anthropic.com/v1/messages',
+  { 'x-api-key': 'sk-xxx', 'content-type': 'application/json' },
+  { model: 'claude', messages: [{ role: 'user', content: 'hello' }] },
+  { includeApiKey: false },  // 可选：隐藏 API Key
+);
+
+console.log(curl);
+```
+
+输出示例：
+
+```text
+curl -X POST 'https://api.anthropic.com/v1/messages' \
+  -H 'x-api-key: ***' \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude","messages":[{"role":"user","content":"hello"}]}'
+```
+
+---
+
+### 设计原则
+
+- **我们只负责把数据交给你**
+- **不往终端打印，不抢 stdout**
+- **写文件必须显式指定路径**
+- **trace 对象是你的，你决定怎么用**
+
 ---
 
 ## 推荐实践
@@ -444,7 +610,7 @@ thoughtSignatures: { claude: 'sig_xxx' }
 
 ## 当前状态
 
-当前 `新项目/` 里的独立包已经完成：
+当前包已完成：
 
 - 独立 `package.json`
 - TypeScript 构建
@@ -453,11 +619,11 @@ thoughtSignatures: { claude: 'sig_xxx' }
 - request / response / stream from-to 转换
 - provider 调用桥接
 - thought signature 跟随格式自动处理
+- 调试钩子 `onRequest` / `onResponse` / `onStreamChunk`
 
 已验证通过：
 
 ```bash
-cd 新项目
 npm run test
 npm run build
 ```

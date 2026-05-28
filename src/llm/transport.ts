@@ -177,6 +177,11 @@ function wrapStreamForDebug(res: Response, url: string, debug?: LLMDebugHooks): 
         }
         chunks.push(decoder.decode(value, { stream: true }));
         controller.enqueue(value);
+        if (debug?.onStreamChunk) {
+          await callDebugHookSafely(debug.onStreamChunk, {
+            url, chunk: chunks[chunks.length - 1], accumulated: chunks.join(''),
+          });
+        }
       } catch (err) {
         await callDebugHookSafely(debug.onResponse, {
           url,

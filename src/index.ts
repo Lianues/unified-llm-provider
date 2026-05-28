@@ -12,6 +12,7 @@ export * from './llm/vision.js';
 export * from './llm/transport.js';
 export * from './llm/response.js';
 export * from './llm/convert.js';
+export * from './llm/debug-utils.js';
 
 export * from './llm/providers/base.js';
 export * from './llm/providers/gemini.js';
