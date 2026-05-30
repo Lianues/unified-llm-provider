@@ -5,7 +5,7 @@
  * 支持流式和非流式请求，通过 streamUrl 字段区分 URL。
  */
 
-import type { FetchLike, LLMDebugHooks } from '../config/types.js';
+import type { FetchLike, LLMDebugHooks, LLMProxyOption } from '../config/types.js';
 
 export interface EndpointConfig {
   /** 非流式请求 URL */
@@ -18,6 +18,8 @@ export interface EndpointConfig {
   fetch?: FetchLike;
   /** 调试钩子 */
   debug?: LLMDebugHooks;
+  /** 显式指定 HTTP/HTTPS 代理 */
+  proxy?: LLMProxyOption;
   /** 非流式默认超时（毫秒） */
   timeoutMs?: number;
   /** 流式默认超时（毫秒） */
@@ -30,6 +32,17 @@ export interface EndpointConfig {
 const DEFAULT_TIMEOUT = 60_000;
 /** 流式请求默认超时（毫秒） */
 const DEFAULT_STREAM_TIMEOUT = 600_000;
+
+type ProxyAgentConstructor = new (options: string | { uri: string; headers?: Record<string, string> }) => unknown;
+
+const proxyDispatcherCache = new Map<string, unknown>();
+let proxyAgentConstructorPromise: Promise<ProxyAgentConstructor> | undefined;
+
+interface NormalizedProxyOption {
+  uri: string;
+  headers?: Record<string, string>;
+  cacheKey: string;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -83,6 +96,51 @@ function combineSignals(externalSignal: AbortSignal | undefined, timeoutMs: numb
   return controller.signal;
 }
 
+function normalizeProxyOption(proxy?: LLMProxyOption): NormalizedProxyOption | undefined {
+  if (!proxy) return undefined;
+
+  if (typeof proxy === 'string') {
+    const uri = proxy.trim();
+    return uri ? { uri, cacheKey: JSON.stringify({ uri }) } : undefined;
+  }
+
+  const uri = proxy.url.trim();
+  if (!uri) return undefined;
+  const headers = proxy.headers && Object.keys(proxy.headers).length > 0 ? proxy.headers : undefined;
+  const sortedHeaders = headers
+    ? Object.fromEntries(Object.entries(headers).sort(([left], [right]) => left.localeCompare(right)))
+    : undefined;
+
+  return {
+    uri,
+    headers,
+    cacheKey: JSON.stringify({ uri, headers: sortedHeaders }),
+  };
+}
+
+async function loadProxyAgentConstructor(): Promise<ProxyAgentConstructor> {
+  if (!proxyAgentConstructorPromise) {
+    proxyAgentConstructorPromise = import('undici')
+      .then(mod => mod.ProxyAgent as unknown as ProxyAgentConstructor);
+  }
+  return proxyAgentConstructorPromise;
+}
+
+async function getProxyDispatcher(proxy?: LLMProxyOption): Promise<unknown | undefined> {
+  const normalized = normalizeProxyOption(proxy);
+  if (!normalized) return undefined;
+
+  const cached = proxyDispatcherCache.get(normalized.cacheKey);
+  if (cached) return cached;
+
+  const ProxyAgent = await loadProxyAgentConstructor();
+  const dispatcher = normalized.headers
+    ? new ProxyAgent({ uri: normalized.uri, headers: normalized.headers })
+    : new ProxyAgent(normalized.uri);
+  proxyDispatcherCache.set(normalized.cacheKey, dispatcher);
+  return dispatcher;
+}
+
 export async function sendRequest(
   endpoint: EndpointConfig,
   body: unknown,
@@ -107,14 +165,18 @@ export async function sendRequest(
   });
 
   const fetchImpl = endpoint.fetch ?? fetch;
+  const dispatcher = await getProxyDispatcher(endpoint.proxy);
+  const init: RequestInit & { dispatcher?: unknown } = {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: combineSignals(signal, effectiveTimeout),
+  };
+  if (dispatcher) init.dispatcher = dispatcher;
+
   let res: Response;
   try {
-    res = await fetchImpl(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: combineSignals(signal, effectiveTimeout),
-    });
+    res = await fetchImpl(url, init);
   } catch (err) {
     await callDebugHookSafely(endpoint.debug?.onResponse, {
       url,

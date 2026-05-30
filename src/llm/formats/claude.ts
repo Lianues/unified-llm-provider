@@ -42,8 +42,8 @@ export class ClaudeFormat implements FormatAdapter {
 
         // 思考部分 (Claude Thinking) — 必须在 text 之前。
         // 即便没有 Claude 签名，也保留 thought 文本，避免跨格式转换时丢失 reasoning/thinking 内容。
-        const thoughtParts = content.parts.filter(p => isTextPart(p) && p.thought === true);
-        for (const part of thoughtParts) {
+        for (const part of content.parts) {
+          if (!isTextPart(part) || part.thought !== true) continue;
           const sig = part.thoughtSignatures?.claude;
           const thinkingText = part.text || '';
           if (!thinkingText && !sig) continue;

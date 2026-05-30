@@ -35,7 +35,18 @@ export interface LLMEndpointOverride {
   url?: string;
   streamUrl?: string;
   headers?: Record<string, string>;
+  /** 显式指定此 endpoint 使用的 HTTP/HTTPS 代理 */
+  proxy?: LLMProxyOption;
 }
+
+export interface LLMProxyConfig {
+  /** 代理地址，例如 http://127.0.0.1:7890 */
+  url: string;
+  /** 连接代理服务器时附加的请求头 */
+  headers?: Record<string, string>;
+}
+
+export type LLMProxyOption = string | LLMProxyConfig;
 
 export interface LLMConfig {
   provider: string;
@@ -68,6 +79,8 @@ export interface LLMConfig {
   streamTimeoutMs?: number;
   /** 自定义 fetch 实现 */
   fetch?: FetchLike;
+  /** 显式指定 HTTP/HTTPS 代理，例如 http://127.0.0.1:7890 */
+  proxy?: LLMProxyOption;
   /** 调试钩子 */
   debug?: LLMDebugHooks;
   /** 友好名称，可选 */

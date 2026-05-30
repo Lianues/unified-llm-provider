@@ -24,6 +24,7 @@ export function createOpenAIResponsesProvider(config: LLMConfig): LLMProvider {
       },
       fetch: config.fetch,
       debug: config.debug,
+      proxy: config.endpoint?.proxy ?? config.proxy,
       timeoutMs: config.timeoutMs,
       streamTimeoutMs: config.streamTimeoutMs,
     },

@@ -58,6 +58,37 @@ describe('providers / router', () => {
     expect(thought.thoughtSignatures).toBeUndefined();
   });
 
+  it('Provider 支持通过 proxy 参数显式指定 HTTP 代理', async () => {
+    const calls: Array<{ dispatcher: unknown; body: any }> = [];
+    const mockFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit & { dispatcher?: unknown }) => {
+      calls.push({
+        dispatcher: init?.dispatcher,
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response(JSON.stringify({
+        content: [{ type: 'text', text: 'done' }],
+        stop_reason: 'end_turn',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    const provider = createClaudeProvider({
+      provider: 'claude',
+      model: 'claude-sonnet-4',
+      apiKey: 'test-key',
+      baseUrl: 'https://api.anthropic.com/v1',
+      proxy: 'http://127.0.0.1:7890',
+      fetch: mockFetch as any,
+    });
+
+    await provider.chat({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    }, { inputFormat: 'unified', outputFormat: 'unified' });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].dispatcher).toBeTruthy();
+    expect(calls[0].body.messages[0].content).toBe('hello');
+  });
+
   it('当用户传入 Claude 格式并实际调用 Gemini 时：请求不错误复用 Claude 签名，返回仍按 Claude 格式但签名前缀为 gemini', async () => {
     const calls: any[] = [];
     const mockFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
