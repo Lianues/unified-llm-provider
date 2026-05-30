@@ -8,6 +8,7 @@ import { decodeRequestFromFormat, encodeResponseToFormat, encodeStreamChunkToFor
 import type { FormatAdapter } from '../formats/types.js';
 import { detectLLMRequestSignatureRepresentation } from '../../signatures/normalize.js';
 import { sendRequest, type EndpointConfig } from '../transport.js';
+import type { LLMProxyOption } from '../../config/types.js';
 import { processResponse, processStreamResponse } from '../response.js';
 import type { FormatRegistry } from '../../registry/formats.js';
 
@@ -46,6 +47,8 @@ export interface LLMCallOptions {
   outputFormat?: FormatId;
   /** 自定义格式注册表 */
   formatRegistry?: Pick<FormatRegistry, 'get'>;
+  /** 本次调用显式指定 HTTP/HTTPS 代理；传空字符串可临时禁用 provider 默认代理 */
+  proxy?: LLMProxyOption;
 }
 
 export interface LLMProviderLike {
@@ -96,6 +99,10 @@ export class LLMProvider implements LLMProviderLike {
     return 'string';
   }
 
+  private resolveEndpoint(options?: LLMCallOptions): EndpointConfig {
+    return options && 'proxy' in options ? { ...this.endpoint, proxy: options.proxy } : this.endpoint;
+  }
+
   setLogging(logsDir: string): void {
     this.loggingDir = logsDir;
   }
@@ -109,7 +116,7 @@ export class LLMProvider implements LLMProviderLike {
     });
 
     const body = mergeRequestBody(this.format.encodeRequest(canonicalRequest, false), this.effectiveOverrides);
-    const res = await sendRequest(this.endpoint, body, false, undefined, options?.signal, this.loggingDir);
+    const res = await sendRequest(this.resolveEndpoint(options), body, false, undefined, options?.signal, this.loggingDir);
     const canonicalResponse = await processResponse(res, this.format);
 
     return encodeResponseToFormat(canonicalResponse, {
@@ -129,7 +136,7 @@ export class LLMProvider implements LLMProviderLike {
     });
 
     const body = mergeRequestBody(this.format.encodeRequest(canonicalRequest, true), this.effectiveOverrides);
-    const res = await sendRequest(this.endpoint, body, true, undefined, options?.signal, this.loggingDir);
+    const res = await sendRequest(this.resolveEndpoint(options), body, true, undefined, options?.signal, this.loggingDir);
 
     for await (const chunk of processStreamResponse(res, this.format)) {
       yield encodeStreamChunkToFormat(chunk, {

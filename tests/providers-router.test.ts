@@ -58,7 +58,7 @@ describe('providers / router', () => {
     expect(thought.thoughtSignatures).toBeUndefined();
   });
 
-  it('Provider 支持通过 proxy 参数显式指定 HTTP 代理', async () => {
+  it('Provider 支持通过调用参数 proxy 显式指定 HTTP 代理', async () => {
     const calls: Array<{ dispatcher: unknown; body: any }> = [];
     const mockFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit & { dispatcher?: unknown }) => {
       calls.push({
@@ -76,13 +76,12 @@ describe('providers / router', () => {
       model: 'claude-sonnet-4',
       apiKey: 'test-key',
       baseUrl: 'https://api.anthropic.com/v1',
-      proxy: 'http://127.0.0.1:7890',
       fetch: mockFetch as any,
     });
 
     await provider.chat({
       contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
-    }, { inputFormat: 'unified', outputFormat: 'unified' });
+    }, { inputFormat: 'unified', outputFormat: 'unified', proxy: 'http://127.0.0.1:7890' });
 
     expect(calls).toHaveLength(1);
     expect(calls[0].dispatcher).toBeTruthy();

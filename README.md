@@ -330,6 +330,14 @@ endpoint: {
 }
 ```
 
+单次调用也可以临时覆盖：
+
+```ts
+await provider.chat(request, {
+  proxy: 'http://127.0.0.1:7890',
+});
+```
+
 ---
 
 ### 创建 router
