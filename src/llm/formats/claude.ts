@@ -40,12 +40,18 @@ export class ClaudeFormat implements FormatAdapter {
       if (content.role === 'model') {
         const contentBlocks: Record<string, unknown>[] = [];
 
-        // 思考部分 (Claude Thinking) — 必须在 text 之前
-        const thoughtPart = content.parts.find(p => (p as any).thought && (p as any).thoughtSignatures?.claude);
-        if (thoughtPart) {
-          const sig = (thoughtPart as any).thoughtSignatures.claude;
-          const thinkingText = (thoughtPart as any).text || '';
-          contentBlocks.push({ type: 'thinking', thinking: thinkingText, signature: sig });
+        // 思考部分 (Claude Thinking) — 必须在 text 之前。
+        // 即便没有 Claude 签名，也保留 thought 文本，避免跨格式转换时丢失 reasoning/thinking 内容。
+        const thoughtParts = content.parts.filter(p => isTextPart(p) && p.thought === true);
+        for (const part of thoughtParts) {
+          const sig = part.thoughtSignatures?.claude;
+          const thinkingText = part.text || '';
+          if (!thinkingText && !sig) continue;
+          contentBlocks.push({
+            type: 'thinking',
+            thinking: thinkingText,
+            ...(sig ? { signature: sig } : {}),
+          });
         }
 
         // 文本部分

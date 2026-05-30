@@ -38,6 +38,21 @@ describe('format adapters', () => {
     expect(thinking.thinking).toBe('deep thought');
   });
 
+  it('ClaudeFormat: 无签名 thought part 也会转成 thinking block', () => {
+    const fmt = new ClaudeFormat('claude-sonnet-4');
+    const request: LLMRequest = {
+      contents: [
+        { role: 'user', parts: [{ text: 'hi' }] },
+        { role: 'model', parts: [{ text: 'reasoning without signature', thought: true }, { text: 'answer' }] },
+      ],
+    };
+
+    const body = fmt.encodeRequest(request) as any;
+    const thinking = body.messages[1].content.find((block: any) => block.type === 'thinking');
+    expect(thinking.thinking).toBe('reasoning without signature');
+    expect(thinking.signature).toBeUndefined();
+  });
+
   it('OpenAIResponsesFormat: reasoning item 会回传 encrypted_content', () => {
     const fmt = new OpenAIResponsesFormat('o3');
     const request: LLMRequest = {
