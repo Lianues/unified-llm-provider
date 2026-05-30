@@ -330,6 +330,8 @@ endpoint: {
 }
 ```
 
+显式配置 `proxy` 时，内部会使用 `undici.ProxyAgent`，并对目标请求设置 `requestTls.rejectUnauthorized=false`，方便调试/抓包代理处理 HTTPS。
+
 单次调用也可以临时覆盖：
 
 ```ts

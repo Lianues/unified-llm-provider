@@ -33,7 +33,13 @@ const DEFAULT_TIMEOUT = 60_000;
 /** 流式请求默认超时（毫秒） */
 const DEFAULT_STREAM_TIMEOUT = 600_000;
 
-type ProxyAgentConstructor = new (options: string | { uri: string; headers?: Record<string, string> }) => unknown;
+type ProxyAgentOptions = {
+  uri: string;
+  headers?: Record<string, string>;
+  requestTls?: { rejectUnauthorized?: boolean };
+};
+
+type ProxyAgentConstructor = new (options: string | ProxyAgentOptions) => unknown;
 
 const proxyDispatcherCache = new Map<string, unknown>();
 let proxyAgentConstructorPromise: Promise<ProxyAgentConstructor> | undefined;
@@ -134,9 +140,14 @@ async function getProxyDispatcher(proxy?: LLMProxyOption): Promise<unknown | und
   if (cached) return cached;
 
   const ProxyAgent = await loadProxyAgentConstructor();
-  const dispatcher = normalized.headers
-    ? new ProxyAgent({ uri: normalized.uri, headers: normalized.headers })
-    : new ProxyAgent(normalized.uri);
+  // 仅在显式 proxy 配置存在时使用 ProxyAgent。
+  // 调试代理/抓包代理常会替换 HTTPS 证书；这里对目标请求关闭证书校验，避免 Node/undici 拒绝握手。
+  const dispatcher = new ProxyAgent({
+    uri: normalized.uri,
+    ...(normalized.headers ? { headers: normalized.headers } : {}),
+    requestTls: { rejectUnauthorized: false },
+  });
+
   proxyDispatcherCache.set(normalized.cacheKey, dispatcher);
   return dispatcher;
 }
