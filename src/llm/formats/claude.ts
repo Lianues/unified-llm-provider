@@ -215,19 +215,7 @@ export class ClaudeFormat implements FormatAdapter {
       content: { role: 'model', parts },
       finishReason,
       usageMetadata: data.usage
-        ? (() => {
-            const inputBase = data.usage.input_tokens ?? 0;
-            const cacheCreation = data.usage.cache_creation_input_tokens ?? 0;
-            const cacheRead = data.usage.cache_read_input_tokens ?? 0;
-            const promptTotal = inputBase + cacheCreation + cacheRead;
-            const cachedTotal = cacheRead;
-            return {
-              promptTokenCount: promptTotal,
-              ...(cachedTotal > 0 ? { cachedContentTokenCount: cachedTotal } : {}),
-              candidatesTokenCount: data.usage.output_tokens,
-              totalTokenCount: promptTotal + (data.usage.output_tokens ?? 0),
-            };
-          })()
+        ? buildClaudeUsageMetadata(data.usage)
         : undefined,
     };
   }
@@ -247,7 +235,11 @@ export class ClaudeFormat implements FormatAdapter {
           st.inputTokens = (u.input_tokens ?? 0)
             + (u.cache_creation_input_tokens ?? 0)
             + (u.cache_read_input_tokens ?? 0);
-          st.cachedContentTokens = (u.cache_read_input_tokens ?? 0);
+          st.hasCachedContentTokens = hasOwn(u, 'cache_read_input_tokens');
+          st.cachedContentTokens = u.cache_read_input_tokens ?? 0;
+          st.hasCacheCreationInputTokens = hasOwn(u, 'cache_creation_input_tokens');
+          st.cacheCreationInputTokens = u.cache_creation_input_tokens ?? 0;
+          st.cacheCreationInputTokensDetails = decodeCacheCreationInputTokensDetails(u.cache_creation);
         }
         break;
 
@@ -319,11 +311,16 @@ export class ClaudeFormat implements FormatAdapter {
           // 工具调用已在 content_block_stop 时逐个输出，这里不再需要批量输出
         }
         if (data.usage) {
+          const outputTokens = data.usage.output_tokens ?? 0;
+          const thinkingTokens = data.usage.output_tokens_details?.thinking_tokens;
           chunk.usageMetadata = {
             promptTokenCount: st.inputTokens ?? 0,
-            ...(st.cachedContentTokens ? { cachedContentTokenCount: st.cachedContentTokens } : {}),
+            ...((st.hasCachedContentTokens || (st.cachedContentTokens ?? 0) > 0) ? { cachedContentTokenCount: st.cachedContentTokens ?? 0 } : {}),
+            ...(st.hasCacheCreationInputTokens ? { cacheCreationInputTokenCount: st.cacheCreationInputTokens ?? 0 } : {}),
+            ...(st.cacheCreationInputTokensDetails ? { cacheCreationInputTokensDetails: st.cacheCreationInputTokensDetails } : {}),
+            ...(typeof thinkingTokens === 'number' ? { thoughtsTokenCount: thinkingTokens } : {}),
             candidatesTokenCount: data.usage.output_tokens,
-            totalTokenCount: (st.inputTokens ?? 0) + (data.usage.output_tokens ?? 0),
+            totalTokenCount: (st.inputTokens ?? 0) + outputTokens,
           };
         }
         break;
@@ -338,6 +335,8 @@ export class ClaudeFormat implements FormatAdapter {
     return {
       currentToolUse: null,
       inputTokens: 0,
+      hasCachedContentTokens: false,
+      hasCacheCreationInputTokens: false,
       // pendingFunctionCalls 已废弃：工具调用现在在 content_block_stop 时立即输出，
       // 不再需要攒到 message_delta 批量输出。保留字段兼容 ClaudeStreamState 接口。
       inThinkingBlock: false,
@@ -397,8 +396,53 @@ export class ClaudeFormat implements FormatAdapter {
 interface ClaudeStreamState extends StreamDecodeState {
   currentToolUse: { id: string; name: string; arguments: string } | null;
   inputTokens: number;
+  hasCachedContentTokens?: boolean;
   cachedContentTokens?: number;
+  hasCacheCreationInputTokens?: boolean;
+  cacheCreationInputTokens?: number;
+  cacheCreationInputTokensDetails?: NonNullable<LLMResponse['usageMetadata']>['cacheCreationInputTokensDetails'];
   inThinkingBlock: boolean;
+}
+
+function hasOwn(value: unknown, key: string): boolean {
+  return !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function decodeCacheCreationInputTokensDetails(
+  raw: unknown,
+): NonNullable<LLMResponse['usageMetadata']>['cacheCreationInputTokensDetails'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const data = raw as any;
+  const details: NonNullable<LLMResponse['usageMetadata']>['cacheCreationInputTokensDetails'] = {};
+
+  if (typeof data.ephemeral_5m_input_tokens === 'number') {
+    details.ephemeral5mInputTokenCount = data.ephemeral_5m_input_tokens;
+  }
+  if (typeof data.ephemeral_1h_input_tokens === 'number') {
+    details.ephemeral1hInputTokenCount = data.ephemeral_1h_input_tokens;
+  }
+
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
+function buildClaudeUsageMetadata(usage: any): LLMResponse['usageMetadata'] {
+  const inputBase = usage.input_tokens ?? 0;
+  const cacheCreation = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  const promptTotal = inputBase + cacheCreation + cacheRead;
+  const thinkingTokens = usage.output_tokens_details?.thinking_tokens;
+  const cacheCreationDetails = decodeCacheCreationInputTokensDetails(usage.cache_creation);
+
+  return {
+    promptTokenCount: promptTotal,
+    ...((hasOwn(usage, 'cache_read_input_tokens') || cacheRead > 0) ? { cachedContentTokenCount: cacheRead } : {}),
+    ...(hasOwn(usage, 'cache_creation_input_tokens') ? { cacheCreationInputTokenCount: cacheCreation } : {}),
+    ...(cacheCreationDetails ? { cacheCreationInputTokensDetails: cacheCreationDetails } : {}),
+    ...(typeof thinkingTokens === 'number' ? { thoughtsTokenCount: thinkingTokens } : {}),
+    candidatesTokenCount: usage.output_tokens,
+    totalTokenCount: promptTotal + output,
+  };
 }
 
 function mapStopReason(reason: string | undefined): string {

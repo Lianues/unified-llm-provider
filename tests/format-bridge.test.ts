@@ -66,4 +66,205 @@ describe('format bridge', () => {
 
     expect(chunk.thoughtSignature).toBe('claude:sig_stream_1');
   });
+
+  it('Claude thinking token usage 会保留到 unified，并可转回 Claude', () => {
+    const unified = convertResponse({
+      content: [{ type: 'text', text: 'done' }],
+      stop_reason: 'end_turn',
+      usage: {
+        input_tokens: 25,
+        output_tokens: 348,
+        output_tokens_details: {
+          thinking_tokens: 312,
+        },
+      },
+    }, {
+      from: 'claude',
+      to: 'unified',
+      model: 'claude-opus-4-8',
+    }) as any;
+
+    expect(unified.usageMetadata).toMatchObject({
+      promptTokenCount: 25,
+      candidatesTokenCount: 348,
+      thoughtsTokenCount: 312,
+      totalTokenCount: 373,
+    });
+
+    const roundTrip = convertResponse(unified, {
+      from: 'unified',
+      to: 'claude',
+      model: 'claude-opus-4-8',
+    }) as any;
+
+    expect(roundTrip.usage).toMatchObject({
+      input_tokens: 25,
+      output_tokens: 348,
+      output_tokens_details: {
+        thinking_tokens: 312,
+      },
+    });
+  });
+
+  it('OpenAI reasoning token usage 会映射为 unified thoughtsTokenCount', () => {
+    const unified = convertResponse({
+      choices: [{
+        message: { role: 'assistant', content: 'done' },
+        finish_reason: 'stop',
+      }],
+      usage: {
+        prompt_tokens: 25,
+        prompt_cache_hit_tokens: 5,
+        completion_tokens: 348,
+        completion_tokens_details: {
+          reasoning_tokens: 312,
+        },
+        total_tokens: 373,
+      },
+    }, {
+      from: 'openai-compatible',
+      to: 'unified',
+      model: 'o3',
+    }) as any;
+
+    expect(unified.usageMetadata).toMatchObject({
+      promptTokenCount: 25,
+      cachedContentTokenCount: 5,
+      candidatesTokenCount: 348,
+      thoughtsTokenCount: 312,
+      totalTokenCount: 373,
+    });
+
+    const responses = convertResponse(unified, {
+      from: 'unified',
+      to: 'openai-responses',
+      model: 'o3',
+    }) as any;
+
+    expect(responses.usage.output_tokens_details.reasoning_tokens).toBe(312);
+    expect(responses.usage.total_tokens).toBe(373);
+
+    const unifiedFromResponses = convertResponse({
+      output: [{
+        type: 'message',
+        content: [{ type: 'output_text', text: 'done' }],
+      }],
+      usage: {
+        input_tokens: 36,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 87,
+        output_tokens_details: {
+          reasoning_tokens: 11,
+        },
+        total_tokens: 123,
+      },
+    }, {
+      from: 'openai-responses',
+      to: 'unified',
+      model: 'o3',
+    }) as any;
+
+    expect(unifiedFromResponses.usageMetadata.thoughtsTokenCount).toBe(11);
+    expect(unifiedFromResponses.usageMetadata.totalTokenCount).toBe(123);
+  });
+
+  it('Claude response 的 cache creation usage 会保留到 unified，并可转回 Claude', () => {
+    const claudeResponse = {
+      id: 'msg_01XFDUDYJgAACzvnptvVoYEL',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      model: 'claude-opus-4-8',
+      stop_reason: 'max_tokens',
+      stop_sequence: null,
+      usage: {
+        input_tokens: 8,
+        cache_creation_input_tokens: 5120,
+        cache_read_input_tokens: 0,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 5120,
+          ephemeral_1h_input_tokens: 0,
+        },
+        output_tokens: 0,
+      },
+    };
+
+    const unified = convertResponse(claudeResponse, {
+      from: 'claude',
+      to: 'unified',
+      model: 'claude-opus-4-8',
+    }) as any;
+
+    expect(unified.usageMetadata).toMatchObject({
+      promptTokenCount: 5128,
+      cachedContentTokenCount: 0,
+      cacheCreationInputTokenCount: 5120,
+      cacheCreationInputTokensDetails: {
+        ephemeral5mInputTokenCount: 5120,
+        ephemeral1hInputTokenCount: 0,
+      },
+      candidatesTokenCount: 0,
+      totalTokenCount: 5128,
+    });
+
+    const roundTrip = convertResponse(unified, {
+      from: 'unified',
+      to: 'claude',
+      model: 'claude-opus-4-8',
+    }) as any;
+
+    expect(roundTrip.usage).toMatchObject({
+      input_tokens: 8,
+      cache_creation_input_tokens: 5120,
+      cache_read_input_tokens: 0,
+      cache_creation: {
+        ephemeral_5m_input_tokens: 5120,
+        ephemeral_1h_input_tokens: 0,
+      },
+      output_tokens: 0,
+    });
+  });
+
+  it('stream converter 可把 Claude 流式 cache creation usage 转成 unified chunk', () => {
+    const converter = createStreamConverter({ from: 'claude', to: 'unified', model: 'claude-opus-4-8' });
+
+    converter.convert({
+      type: 'message_start',
+      message: {
+        usage: {
+          input_tokens: 8,
+          cache_creation_input_tokens: 5120,
+          cache_read_input_tokens: 0,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 5120,
+            ephemeral_1h_input_tokens: 0,
+          },
+        },
+      },
+    });
+
+    const chunk = converter.convert({
+      type: 'message_delta',
+      delta: { stop_reason: 'max_tokens' },
+      usage: {
+        output_tokens: 0,
+        output_tokens_details: {
+          thinking_tokens: 0,
+        },
+      },
+    }) as any;
+
+    expect(chunk.usageMetadata).toMatchObject({
+      promptTokenCount: 5128,
+      cachedContentTokenCount: 0,
+      cacheCreationInputTokenCount: 5120,
+      cacheCreationInputTokensDetails: {
+        ephemeral5mInputTokenCount: 5120,
+        ephemeral1hInputTokenCount: 0,
+      },
+      candidatesTokenCount: 0,
+      thoughtsTokenCount: 0,
+      totalTokenCount: 5128,
+    });
+  });
 });

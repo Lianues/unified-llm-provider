@@ -178,9 +178,11 @@ export class OpenAIResponsesFormat implements FormatAdapter {
       usageMetadata: data.usage
         ? (() => {
             const cached = data.usage.input_tokens_details?.cached_tokens ?? 0;
+            const reasoningTokens = data.usage.output_tokens_details?.reasoning_tokens;
             return {
               promptTokenCount: data.usage.input_tokens,
               ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
+              ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
               candidatesTokenCount: data.usage.output_tokens,
               totalTokenCount: data.usage.total_tokens,
             };
@@ -246,11 +248,13 @@ export class OpenAIResponsesFormat implements FormatAdapter {
     } else if (event === 'response.completed') {
       const usage = data.usage ?? data.response?.usage;
       if (usage) {
+        const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
         chunk.usageMetadata = {
           promptTokenCount: usage.input_tokens,
           ...((usage.input_tokens_details?.cached_tokens ?? 0) > 0
             ? { cachedContentTokenCount: usage.input_tokens_details.cached_tokens }
             : {}),
+          ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
           candidatesTokenCount: usage.output_tokens,
           totalTokenCount: usage.total_tokens,
         };

@@ -207,12 +207,14 @@ export class OpenAICompatibleFormat implements FormatAdapter {
       finishReason: choice.finish_reason,
       usageMetadata: data.usage
         ? (() => {
-            const cached = data.usage.prompt_tokens_details?.cached_tokens ?? 0;
+            const cached = data.usage.prompt_tokens_details?.cached_tokens ?? data.usage.prompt_cache_hit_tokens ?? 0;
+            const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens;
             return {
-            promptTokenCount: data.usage.prompt_tokens,
-            ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
-            candidatesTokenCount: data.usage.completion_tokens,
-            totalTokenCount: data.usage.total_tokens,
+              promptTokenCount: data.usage.prompt_tokens,
+              ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
+              ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
+              candidatesTokenCount: data.usage.completion_tokens,
+              totalTokenCount: data.usage.total_tokens,
             };
           })()
         : undefined,
@@ -324,11 +326,14 @@ export class OpenAICompatibleFormat implements FormatAdapter {
 
     // usage
     if (data.usage) {
+      const cached = data.usage.prompt_tokens_details?.cached_tokens ?? data.usage.prompt_cache_hit_tokens ?? 0;
+      const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens;
       chunk.usageMetadata = {
         promptTokenCount: data.usage.prompt_tokens,
-        ...((data.usage.prompt_tokens_details?.cached_tokens ?? 0) > 0
-          ? { cachedContentTokenCount: data.usage.prompt_tokens_details.cached_tokens }
+        ...(cached > 0
+          ? { cachedContentTokenCount: cached }
           : {}),
+        ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
         candidatesTokenCount: data.usage.completion_tokens,
         totalTokenCount: data.usage.total_tokens,
       };

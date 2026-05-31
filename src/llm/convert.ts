@@ -516,10 +516,66 @@ export function decodeRequestFromFormat(raw: unknown, options: DecodeRequestFrom
 
 function mapUsageToClaude(usage: LLMResponse['usageMetadata']): Record<string, unknown> | undefined {
   if (!usage) return undefined;
+
+  const cacheCreation = getCacheCreationInputTokenCount(usage);
+  const hasCacheCreation = cacheCreation !== undefined || usage.cacheCreationInputTokensDetails !== undefined;
+  const cacheRead = usage.cachedContentTokenCount ?? 0;
+  const promptTotal = usage.promptTokenCount ?? 0;
+  const inputTokens = hasCacheCreation
+    ? Math.max(0, promptTotal - (cacheCreation ?? 0) - cacheRead)
+    : promptTotal;
+  const cacheCreationDetails = mapCacheCreationDetailsToClaude(usage.cacheCreationInputTokensDetails);
+  const outputTokensDetails = usage.thoughtsTokenCount !== undefined
+    ? { thinking_tokens: usage.thoughtsTokenCount }
+    : undefined;
+
   return {
-    input_tokens: usage.promptTokenCount ?? 0,
-    cache_read_input_tokens: usage.cachedContentTokenCount ?? 0,
+    input_tokens: inputTokens,
+    ...(hasCacheCreation ? { cache_creation_input_tokens: cacheCreation ?? 0 } : {}),
+    cache_read_input_tokens: cacheRead,
+    ...(cacheCreationDetails ? { cache_creation: cacheCreationDetails } : {}),
     output_tokens: usage.candidatesTokenCount ?? 0,
+    ...(outputTokensDetails ? { output_tokens_details: outputTokensDetails } : {}),
+  };
+}
+
+function getCacheCreationInputTokenCount(usage: LLMResponse['usageMetadata']): number | undefined {
+  if (!usage) return undefined;
+  if (usage.cacheCreationInputTokenCount !== undefined) return usage.cacheCreationInputTokenCount;
+
+  const details = usage.cacheCreationInputTokensDetails;
+  const values = [
+    details?.ephemeral5mInputTokenCount,
+    details?.ephemeral1hInputTokenCount,
+  ].filter((value): value is number => typeof value === 'number');
+
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function mapCacheCreationDetailsToClaude(
+  details: NonNullable<LLMResponse['usageMetadata']>['cacheCreationInputTokensDetails'] | undefined,
+): Record<string, unknown> | undefined {
+  if (!details) return undefined;
+  const mapped: Record<string, unknown> = {};
+  if (details.ephemeral5mInputTokenCount !== undefined) {
+    mapped.ephemeral_5m_input_tokens = details.ephemeral5mInputTokenCount;
+  }
+  if (details.ephemeral1hInputTokenCount !== undefined) {
+    mapped.ephemeral_1h_input_tokens = details.ephemeral1hInputTokenCount;
+  }
+  return Object.keys(mapped).length > 0 ? mapped : undefined;
+}
+
+function mapUsageToGemini(usage: LLMResponse['usageMetadata']): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  return {
+    ...(usage.promptTokenCount !== undefined ? { promptTokenCount: usage.promptTokenCount } : {}),
+    ...(usage.cachedContentTokenCount !== undefined ? { cachedContentTokenCount: usage.cachedContentTokenCount } : {}),
+    ...(usage.candidatesTokenCount !== undefined ? { candidatesTokenCount: usage.candidatesTokenCount } : {}),
+    ...(usage.thoughtsTokenCount !== undefined ? { thoughtsTokenCount: usage.thoughtsTokenCount } : {}),
+    ...(usage.totalTokenCount !== undefined ? { totalTokenCount: usage.totalTokenCount } : {}),
+    ...(usage.promptTokensDetails !== undefined ? { promptTokensDetails: usage.promptTokensDetails } : {}),
+    ...(usage.candidatesTokensDetails !== undefined ? { candidatesTokensDetails: usage.candidatesTokensDetails } : {}),
   };
 }
 
@@ -531,6 +587,9 @@ function mapUsageToOpenAI(usage: LLMResponse['usageMetadata']): Record<string, u
       cached_tokens: usage.cachedContentTokenCount ?? 0,
     },
     completion_tokens: usage.candidatesTokenCount ?? 0,
+    ...(usage.thoughtsTokenCount !== undefined ? { completion_tokens_details: {
+      reasoning_tokens: usage.thoughtsTokenCount,
+    } } : {}),
     total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
   };
 }
@@ -543,6 +602,9 @@ function mapUsageToOpenAIResponses(usage: LLMResponse['usageMetadata']): Record<
       cached_tokens: usage.cachedContentTokenCount ?? 0,
     },
     output_tokens: usage.candidatesTokenCount ?? 0,
+    ...(usage.thoughtsTokenCount !== undefined ? { output_tokens_details: {
+      reasoning_tokens: usage.thoughtsTokenCount,
+    } } : {}),
     total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
   };
 }
@@ -721,7 +783,7 @@ export function encodeResponseToFormat(response: LLMResponse, options: EncodeRes
           content: encoded.contents?.[0] ?? { role: 'model', parts: [{ text: '' }] },
           finishReason: normalizedResponse.finishReason,
         }],
-        usageMetadata: normalizedResponse.usageMetadata,
+        usageMetadata: mapUsageToGemini(normalizedResponse.usageMetadata),
       };
     case 'claude': {
       const assistantMessage = Array.isArray(encoded.messages)
@@ -856,7 +918,7 @@ function createGeminiStreamPayload(chunk: LLMStreamChunk): unknown {
       content: parts.length > 0 ? { role: 'model', parts } : undefined,
       ...(chunk.finishReason ? { finishReason: chunk.finishReason } : {}),
     }],
-    ...(chunk.usageMetadata ? { usageMetadata: chunk.usageMetadata } : {}),
+    ...(chunk.usageMetadata ? { usageMetadata: mapUsageToGemini(chunk.usageMetadata) } : {}),
   };
 }
 
@@ -925,11 +987,22 @@ function createClaudeStreamPayloads(chunk: LLMStreamChunk): unknown[] {
     payloads.push({
       type: 'message_delta',
       ...(chunk.finishReason ? { delta: { stop_reason: mapFinishReasonToClaude(chunk.finishReason) } } : {}),
-      ...(chunk.usageMetadata ? { usage: { output_tokens: chunk.usageMetadata.candidatesTokenCount ?? 0 } } : {}),
+      ...(chunk.usageMetadata ? { usage: mapUsageToClaudeStreamDelta(chunk.usageMetadata) } : {}),
     });
   }
 
   return payloads;
+}
+
+function mapUsageToClaudeStreamDelta(usage: LLMResponse['usageMetadata']): Record<string, unknown> {
+  return {
+    output_tokens: usage?.candidatesTokenCount ?? 0,
+    ...(usage?.thoughtsTokenCount !== undefined ? {
+      output_tokens_details: {
+        thinking_tokens: usage.thoughtsTokenCount,
+      },
+    } : {}),
+  };
 }
 
 function createOpenAIResponsesStreamPayloads(chunk: LLMStreamChunk): unknown[] {

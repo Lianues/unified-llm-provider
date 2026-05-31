@@ -116,6 +116,104 @@ const request = {
 };
 ```
 
+
+### UsageMetadata / token 用量
+
+`unified` 响应里的 `usageMetadata` 沿用 Gemini-like 的核心字段，并在此基础上补充少量跨 provider 都有实际意义的明细字段。
+
+```ts
+interface UsageMetadata {
+  /** 输入侧 token 总数。Claude 下包含 input + cache creation + cache read。 */
+  promptTokenCount?: number;
+
+  /** 缓存命中 / cache read token 数。 */
+  cachedContentTokenCount?: number;
+
+  /** 输出 token 数。对支持 reasoning/thinking 的模型，通常已包含思考 token。 */
+  candidatesTokenCount?: number;
+
+  /** 请求总 token 数。注意：它已经包含 thoughtsTokenCount，不要再额外相加。 */
+  totalTokenCount?: number;
+
+  /** 思考 / 推理 token 明细。 */
+  thoughtsTokenCount?: number;
+
+  /** Claude cache creation token，已包含在 promptTokenCount 内。 */
+  cacheCreationInputTokenCount?: number;
+
+  /** Claude cache creation 的 TTL 级明细。 */
+  cacheCreationInputTokensDetails?: {
+    ephemeral5mInputTokenCount?: number;
+    ephemeral1hInputTokenCount?: number;
+  };
+
+  promptTokensDetails?: TokensDetail[];
+  candidatesTokensDetails?: TokensDetail[];
+}
+```
+
+核心规则：
+
+- `promptTokenCount` 表示输入侧总量；对于 Claude，它等于 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`。
+- `cachedContentTokenCount` 表示缓存命中 / cache read，不额外增加新的 cache miss 字段。
+- `cacheCreationInputTokenCount` 是缓存创建明细，已经包含在 `promptTokenCount` 内，不应再次相加。
+- `thoughtsTokenCount` 是思考 token 明细，已经包含在 provider 返回的输出/总量中，不应再次加到 `totalTokenCount`。
+- `totalTokenCount` 优先使用 provider 返回的总量；没有原生总量时才按现有字段回退计算。
+
+#### usage 字段映射
+
+| unified 字段 | Claude | OpenAI-compatible | OpenAI Responses | Gemini |
+|---|---|---|---|---|
+| `promptTokenCount` | `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` | `prompt_tokens` | `input_tokens` | `promptTokenCount` |
+| `cachedContentTokenCount` | `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens` | `input_tokens_details.cached_tokens` | `cachedContentTokenCount` |
+| `cacheCreationInputTokenCount` | `cache_creation_input_tokens` | - | - | - |
+| `cacheCreationInputTokensDetails.ephemeral5mInputTokenCount` | `cache_creation.ephemeral_5m_input_tokens` | - | - | - |
+| `cacheCreationInputTokensDetails.ephemeral1hInputTokenCount` | `cache_creation.ephemeral_1h_input_tokens` | - | - | - |
+| `candidatesTokenCount` | `output_tokens` | `completion_tokens` | `output_tokens` | `candidatesTokenCount` |
+| `thoughtsTokenCount` | `output_tokens_details.thinking_tokens` | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | `thoughtsTokenCount` |
+| `totalTokenCount` | `promptTokenCount + output_tokens` 或 provider 总量 | `total_tokens` | `total_tokens` | `totalTokenCount` |
+| `promptTokensDetails` | - | - | - | `promptTokensDetails` |
+| `candidatesTokensDetails` | - | - | - | `candidatesTokensDetails` |
+
+#### 示例：Claude cache creation + thinking tokens
+
+Claude 原始 usage：
+
+```json
+{
+  "input_tokens": 8,
+  "cache_creation_input_tokens": 5120,
+  "cache_read_input_tokens": 0,
+  "cache_creation": {
+    "ephemeral_5m_input_tokens": 5120,
+    "ephemeral_1h_input_tokens": 0
+  },
+  "output_tokens": 348,
+  "output_tokens_details": {
+    "thinking_tokens": 312
+  }
+}
+```
+
+转换成 `unified` 后：
+
+```json
+{
+  "promptTokenCount": 5128,
+  "cachedContentTokenCount": 0,
+  "cacheCreationInputTokenCount": 5120,
+  "cacheCreationInputTokensDetails": {
+    "ephemeral5mInputTokenCount": 5120,
+    "ephemeral1hInputTokenCount": 0
+  },
+  "candidatesTokenCount": 348,
+  "thoughtsTokenCount": 312,
+  "totalTokenCount": 5476
+}
+```
+
+这里 `totalTokenCount = promptTokenCount + candidatesTokenCount`，而 `thoughtsTokenCount` 只是 `candidatesTokenCount` 里的明细，不再额外相加。
+
 ---
 
 ## 安装

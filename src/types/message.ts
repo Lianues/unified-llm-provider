@@ -75,13 +75,26 @@ export interface TokensDetail {
 }
 
 /** API 调用的 Token 用量统计 */
+export interface CacheCreationInputTokensDetails {
+  /** Claude: usage.cache_creation.ephemeral_5m_input_tokens */
+  ephemeral5mInputTokenCount?: number;
+  /** Claude: usage.cache_creation.ephemeral_1h_input_tokens */
+  ephemeral1hInputTokenCount?: number;
+}
+
 export interface UsageMetadata {
   promptTokenCount?: number;
   cachedContentTokenCount?: number;
   candidatesTokenCount?: number;
   totalTokenCount?: number;
+  /** Gemini thoughtsTokenCount / Claude thinking_tokens / OpenAI reasoning_tokens */
+  thoughtsTokenCount?: number;
   promptTokensDetails?: TokensDetail[];
   candidatesTokensDetails?: TokensDetail[];
+  /** Claude: usage.cache_creation_input_tokens，已包含在 promptTokenCount 内 */
+  cacheCreationInputTokenCount?: number;
+  /** Claude: usage.cache_creation 的小时级/TTL 级缓存创建明细 */
+  cacheCreationInputTokensDetails?: CacheCreationInputTokensDetails;
 }
 
 /** 一条消息内容（Gemini Content 格式） */
