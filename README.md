@@ -146,9 +146,6 @@ interface UsageMetadata {
     ephemeral5mInputTokenCount?: number;
     ephemeral1hInputTokenCount?: number;
   };
-
-  promptTokensDetails?: TokensDetail[];
-  candidatesTokensDetails?: TokensDetail[];
 }
 ```
 
@@ -159,6 +156,7 @@ interface UsageMetadata {
 - `cacheCreationInputTokenCount` 是缓存创建明细，已经包含在 `promptTokenCount` 内，不应再次相加。
 - `thoughtsTokenCount` 是思考 token 明细，已经包含在 provider 返回的输出/总量中，不应再次加到 `totalTokenCount`。
 - `totalTokenCount` 优先使用 provider 返回的总量；没有原生总量时才按现有字段回退计算。
+- Gemini 的 modality 详情、`toolUsePromptTokenCount`、`toolUsePromptTokensDetails`、`cacheTokensDetails`、`serviceTier` 等字段不会进入 `unified`，会在解码时过滤。
 
 #### usage 字段映射
 
@@ -172,8 +170,6 @@ interface UsageMetadata {
 | `candidatesTokenCount` | `output_tokens` | `completion_tokens` | `output_tokens` | `candidatesTokenCount` |
 | `thoughtsTokenCount` | `output_tokens_details.thinking_tokens` | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | `thoughtsTokenCount` |
 | `totalTokenCount` | `promptTokenCount + output_tokens` 或 provider 总量 | `total_tokens` | `total_tokens` | `totalTokenCount` |
-| `promptTokensDetails` | - | - | - | `promptTokensDetails` |
-| `candidatesTokensDetails` | - | - | - | `candidatesTokensDetails` |
 
 #### 示例：Claude cache creation + thinking tokens
 

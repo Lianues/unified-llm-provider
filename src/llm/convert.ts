@@ -574,8 +574,6 @@ function mapUsageToGemini(usage: LLMResponse['usageMetadata']): Record<string, u
     ...(usage.candidatesTokenCount !== undefined ? { candidatesTokenCount: usage.candidatesTokenCount } : {}),
     ...(usage.thoughtsTokenCount !== undefined ? { thoughtsTokenCount: usage.thoughtsTokenCount } : {}),
     ...(usage.totalTokenCount !== undefined ? { totalTokenCount: usage.totalTokenCount } : {}),
-    ...(usage.promptTokensDetails !== undefined ? { promptTokensDetails: usage.promptTokensDetails } : {}),
-    ...(usage.candidatesTokensDetails !== undefined ? { candidatesTokensDetails: usage.candidatesTokensDetails } : {}),
   };
 }
 

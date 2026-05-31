@@ -68,12 +68,6 @@ export type Part = TextPart | InlineDataPart | FunctionCallPart | FunctionRespon
 /** 消息角色 */
 export type Role = 'user' | 'model';
 
-/** Token 用量详情（按模态拆分） */
-export interface TokensDetail {
-  modality: string;
-  tokenCount: number;
-}
-
 /** API 调用的 Token 用量统计 */
 export interface CacheCreationInputTokensDetails {
   /** Claude: usage.cache_creation.ephemeral_5m_input_tokens */
@@ -89,8 +83,6 @@ export interface UsageMetadata {
   totalTokenCount?: number;
   /** Gemini thoughtsTokenCount / Claude thinking_tokens / OpenAI reasoning_tokens */
   thoughtsTokenCount?: number;
-  promptTokensDetails?: TokensDetail[];
-  candidatesTokensDetails?: TokensDetail[];
   /** Claude: usage.cache_creation_input_tokens，已包含在 promptTokenCount 内 */
   cacheCreationInputTokenCount?: number;
   /** Claude: usage.cache_creation 的小时级/TTL 级缓存创建明细 */

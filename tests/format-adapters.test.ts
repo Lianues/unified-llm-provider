@@ -80,4 +80,34 @@ describe('format adapters', () => {
     expect(thought.thoughtSignature).toBe('claude:sig_dec_1');
     expect(thought.thoughtSignatures).toBeUndefined();
   });
+
+  it('Gemini usageMetadata 解码到 unified 时会过滤模态/tier/tool 等非通用字段', () => {
+    const response = decodeResponseFromFormat({
+      candidates: [{
+        content: { role: 'model', parts: [{ text: 'done' }] },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: {
+        promptTokenCount: 10,
+        cachedContentTokenCount: 2,
+        candidatesTokenCount: 5,
+        thoughtsTokenCount: 3,
+        totalTokenCount: 18,
+        promptTokensDetails: [{ modality: 'TEXT', tokenCount: 10 }],
+        cacheTokensDetails: [{ modality: 'TEXT', tokenCount: 2 }],
+        candidatesTokensDetails: [{ modality: 'TEXT', tokenCount: 5 }],
+        toolUsePromptTokenCount: 7,
+        toolUsePromptTokensDetails: [{ modality: 'TEXT', tokenCount: 7 }],
+        serviceTier: 'STANDARD',
+      },
+    }, { format: 'gemini' }) as any;
+
+    expect(response.usageMetadata).toEqual({
+      promptTokenCount: 10,
+      cachedContentTokenCount: 2,
+      candidatesTokenCount: 5,
+      thoughtsTokenCount: 3,
+      totalTokenCount: 18,
+    });
+  });
 });

@@ -62,7 +62,7 @@ export class GeminiFormat implements FormatAdapter {
     return {
       content: candidate.content,
       finishReason: candidate.finishReason,
-      usageMetadata: data.usageMetadata,
+      usageMetadata: sanitizeGeminiUsageMetadata(data.usageMetadata),
     };
   }
 
@@ -138,7 +138,10 @@ export class GeminiFormat implements FormatAdapter {
     }
 
     if (candidate?.finishReason) chunk.finishReason = candidate.finishReason;
-    if (data.usageMetadata) chunk.usageMetadata = data.usageMetadata;
+    if (data.usageMetadata) {
+      const usageMetadata = sanitizeGeminiUsageMetadata(data.usageMetadata);
+      if (usageMetadata) chunk.usageMetadata = usageMetadata;
+    }
 
     return chunk;
   }
@@ -147,6 +150,22 @@ export class GeminiFormat implements FormatAdapter {
   createStreamState(): StreamDecodeState {
     return {};
   }
+}
+
+function sanitizeGeminiUsageMetadata(raw: unknown): LLMResponse['usageMetadata'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const data = raw as any;
+  const usage: NonNullable<LLMResponse['usageMetadata']> = {};
+
+  if (typeof data.promptTokenCount === 'number') usage.promptTokenCount = data.promptTokenCount;
+  if (typeof data.cachedContentTokenCount === 'number') usage.cachedContentTokenCount = data.cachedContentTokenCount;
+  if (typeof data.candidatesTokenCount === 'number') usage.candidatesTokenCount = data.candidatesTokenCount;
+  if (typeof data.thoughtsTokenCount === 'number') usage.thoughtsTokenCount = data.thoughtsTokenCount;
+  if (typeof data.totalTokenCount === 'number') usage.totalTokenCount = data.totalTokenCount;
+
+  // Gemini 还会返回 modality 详情、tool use prompt token、serviceTier 等字段。
+  // 这些字段目前不作为 unified usage 的通用字段，进入 unified 前统一过滤。
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 /** 过滤内部字段，防止发送到外部 API */
