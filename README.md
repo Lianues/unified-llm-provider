@@ -352,6 +352,48 @@ openai-compatible request
 
 签名也跟着这条链一起走，不用你单独声明“签名转成什么格式”。
 
+### Dry Run：只构建请求，不发送
+
+如果你只想展示或复制“这次真实会发给 provider 的 HTTP 请求”，可以使用 `provider.dryRun()`。
+
+```ts
+const dry = await provider.dryRun(
+  {
+    contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+  },
+  {
+    inputFormat: 'unified',
+    outputFormat: 'unified',
+    stream: true,
+    curl: { includeApiKey: false },
+  }
+);
+
+console.log(dry.curl);
+console.log(dry.url);
+console.log(dry.headers);
+console.log(dry.body);
+```
+
+返回结果包含：
+
+```ts
+dry.url;       // 最终请求 URL
+dry.headers;   // 最终请求 headers（结构化对象）
+dry.body;      // 最终 provider 请求体（结构化对象）
+dry.bodyText;  // JSON 文本，方便展示/复制
+dry.curl;      // 可复制的 curl 命令
+```
+
+说明：
+
+- `dryRun` 会走真实 provider 编码逻辑，复用 `chat` / `chatStream` 的请求构建路径；
+- `dryRun` 不发送网络请求，也不会调用 `fetch`；
+- `curl` 默认隐藏 API Key（`includeApiKey: false`），避免 UI 展示时泄漏密钥；
+- 如果确实需要展示 API Key，可以显式传 `curl: { includeApiKey: true }`；
+- `stream: true` 时生成和 `chatStream` 相同的流式请求；
+- `stream: false` 时生成和 `chat` 相同的非流式请求。
+
 ---
 
 ## Router / Factory

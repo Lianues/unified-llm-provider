@@ -7,10 +7,11 @@ import type { FormatId, UnifiedSignatureMode } from '../convert.js';
 import { decodeRequestFromFormat, encodeResponseToFormat, encodeStreamChunkToFormat, normalizeFormatId } from '../convert.js';
 import type { FormatAdapter } from '../formats/types.js';
 import { detectLLMRequestSignatureRepresentation } from '../../signatures/normalize.js';
-import { sendRequest, type EndpointConfig } from '../transport.js';
+import { buildRequestTransport, sendRequest, type EndpointConfig } from '../transport.js';
 import type { LLMProxyOption } from '../../config/types.js';
 import { processResponse, processStreamResponse } from '../response.js';
 import type { FormatRegistry } from '../../registry/formats.js';
+import { bodyToCurlPayload, formatRequestAsCurl, type CurlFormatOptions } from '../debug-utils.js';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -51,10 +52,46 @@ export interface LLMCallOptions {
   proxy?: LLMProxyOption;
 }
 
+export interface LLMDryRunOptions extends LLMCallOptions {
+  /**
+   * true 表示按 chatStream 路径构建流式请求；
+   * false 表示按 chat 路径构建非流式请求；
+   * 默认 true。
+   */
+  stream?: boolean;
+  /** curl 格式化选项。dryRun 默认 includeApiKey=false、prettyBody=true。 */
+  curl?: CurlFormatOptions;
+}
+
+export interface LLMDryRunResult {
+  url: string;
+  method: 'POST';
+  stream: boolean;
+  headers: Record<string, string>;
+  body: unknown;
+  bodyText: string;
+  curl: string;
+  providerName: string;
+  inputFormat: FormatId;
+  outputFormat: FormatId;
+  timestamp: number;
+}
+
+interface BuiltProviderRequest {
+  inputFormat: FormatId;
+  outputFormat: FormatId;
+  canonicalRequest: LLMRequest;
+  endpoint: EndpointConfig;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
 export interface LLMProviderLike {
   setLogging(logsDir: string): void;
   chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput>;
   chatStream<TOutput = LLMStreamChunk>(request: unknown, options?: LLMCallOptions): AsyncGenerator<TOutput>;
+  dryRun(request: unknown, options?: LLMDryRunOptions): Promise<LLMDryRunResult>;
   patchRequestBodyOverrides?(patch: Record<string, unknown>): void;
   removeRequestBodyOverridePaths?(...paths: string[]): void;
   removeRequestBodyOverrideKeys?(...keys: string[]): void;
@@ -103,47 +140,78 @@ export class LLMProvider implements LLMProviderLike {
     return options && 'proxy' in options ? { ...this.endpoint, proxy: options.proxy } : this.endpoint;
   }
 
+  private buildProviderRequest(request: unknown, options: LLMCallOptions | undefined, stream: boolean): BuiltProviderRequest {
+    const inputFormat = this.resolveInputFormat(options);
+    const outputFormat = this.resolveOutputFormat(inputFormat, options);
+    const canonicalRequest = decodeRequestFromFormat(request, {
+      format: inputFormat,
+      registry: options?.formatRegistry,
+    });
+
+    const body = mergeRequestBody(this.format.encodeRequest(canonicalRequest, stream), this.effectiveOverrides);
+    const endpoint = this.resolveEndpoint(options);
+    const { url, headers } = buildRequestTransport(endpoint, stream);
+    return {
+      inputFormat,
+      outputFormat,
+      canonicalRequest,
+      endpoint,
+      url,
+      headers,
+      body,
+    };
+  }
+
   setLogging(logsDir: string): void {
     this.loggingDir = logsDir;
   }
 
-  async chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput> {
-    const inputFormat = this.resolveInputFormat(options);
-    const outputFormat = this.resolveOutputFormat(inputFormat, options);
-    const canonicalRequest = decodeRequestFromFormat(request, {
-      format: inputFormat,
-      registry: options?.formatRegistry,
-    });
+  async dryRun(request: unknown, options?: LLMDryRunOptions): Promise<LLMDryRunResult> {
+    const stream = options?.stream ?? true;
+    const built = this.buildProviderRequest(request, options, stream);
+    const curlOptions: CurlFormatOptions = {
+      includeApiKey: false,
+      prettyBody: true,
+      ...options?.curl,
+    };
+    return {
+      url: built.url,
+      method: 'POST',
+      stream,
+      headers: built.headers,
+      body: built.body,
+      bodyText: bodyToCurlPayload(built.body),
+      curl: formatRequestAsCurl(built.url, built.headers, built.body, curlOptions),
+      providerName: this.providerName,
+      inputFormat: built.inputFormat,
+      outputFormat: built.outputFormat,
+      timestamp: Date.now(),
+    };
+  }
 
-    const body = mergeRequestBody(this.format.encodeRequest(canonicalRequest, false), this.effectiveOverrides);
-    const res = await sendRequest(this.resolveEndpoint(options), body, false, undefined, options?.signal, this.loggingDir);
+  async chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput> {
+    const built = this.buildProviderRequest(request, options, false);
+    const res = await sendRequest(built.endpoint, built.body, false, undefined, options?.signal, this.loggingDir);
     const canonicalResponse = await processResponse(res, this.format);
 
     return encodeResponseToFormat(canonicalResponse, {
-      format: outputFormat,
+      format: built.outputFormat,
       sourceFormat: this.providerFormat,
       registry: options?.formatRegistry,
-      signatureMode: this.resolveUnifiedSignatureMode(canonicalRequest, inputFormat, outputFormat),
+      signatureMode: this.resolveUnifiedSignatureMode(built.canonicalRequest, built.inputFormat, built.outputFormat),
     }) as TOutput;
   }
 
   async *chatStream<TOutput = LLMStreamChunk>(request: unknown, options?: LLMCallOptions): AsyncGenerator<TOutput> {
-    const inputFormat = this.resolveInputFormat(options);
-    const outputFormat = this.resolveOutputFormat(inputFormat, options);
-    const canonicalRequest = decodeRequestFromFormat(request, {
-      format: inputFormat,
-      registry: options?.formatRegistry,
-    });
-
-    const body = mergeRequestBody(this.format.encodeRequest(canonicalRequest, true), this.effectiveOverrides);
-    const res = await sendRequest(this.resolveEndpoint(options), body, true, undefined, options?.signal, this.loggingDir);
+    const built = this.buildProviderRequest(request, options, true);
+    const res = await sendRequest(built.endpoint, built.body, true, undefined, options?.signal, this.loggingDir);
 
     for await (const chunk of processStreamResponse(res, this.format)) {
       yield encodeStreamChunkToFormat(chunk, {
-        format: outputFormat,
+        format: built.outputFormat,
         sourceFormat: this.providerFormat,
         registry: options?.formatRegistry,
-        signatureMode: this.resolveUnifiedSignatureMode(canonicalRequest, inputFormat, outputFormat),
+        signatureMode: this.resolveUnifiedSignatureMode(built.canonicalRequest, built.inputFormat, built.outputFormat),
       }) as TOutput;
     }
   }

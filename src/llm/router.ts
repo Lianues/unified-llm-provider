@@ -4,8 +4,8 @@
  * 管理一组按 modelName 注册的模型，并维护当前活动模型。
  */
 
-import type { LLMCallOptions, LLMProviderLike } from './providers/base.js';
-import { LLMRequest, LLMResponse, LLMStreamChunk } from '../types.js';
+import type { LLMDryRunOptions, LLMDryRunResult, LLMCallOptions, LLMProviderLike } from './providers/base.js';
+import { LLMResponse, LLMStreamChunk } from '../types.js';
 import type { LLMConfig } from '../config/types.js';
 
 export type LLMModelName = string;
@@ -153,6 +153,11 @@ export class LLMRouter {
   /** 流式调用（按模型名称，可省略以使用当前模型） */
   async *chatStream<TOutput = LLMStreamChunk>(request: unknown, modelName?: LLMModelName, options?: LLMCallOptions): AsyncGenerator<TOutput> {
     yield* this.resolve(modelName).chatStream<TOutput>(request, options);
+  }
+
+  /** Dry Run：只构建目标模型的真实 HTTP 请求，不发送网络请求 */
+  async dryRun(request: unknown, modelName?: LLMModelName, options?: LLMDryRunOptions): Promise<LLMDryRunResult> {
+    return this.resolve(modelName).dryRun(request, options);
   }
 
   /** 运行时浅合并当前模型的 requestBody 覆盖 */

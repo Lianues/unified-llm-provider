@@ -28,6 +28,11 @@ export interface EndpointConfig {
   userAgent?: string;
 }
 
+export interface BuiltRequestTransport {
+  url: string;
+  headers: Record<string, string>;
+}
+
 /** 非流式请求默认超时（毫秒） */
 const DEFAULT_TIMEOUT = 60_000;
 /** 流式请求默认超时（毫秒） */
@@ -152,6 +157,19 @@ async function getProxyDispatcher(proxy?: LLMProxyOption): Promise<unknown | und
   return dispatcher;
 }
 
+export function buildRequestTransport(
+  endpoint: EndpointConfig,
+  stream: boolean,
+): BuiltRequestTransport {
+  const url = stream ? (endpoint.streamUrl ?? endpoint.url) : endpoint.url;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'User-Agent': endpoint.userAgent ?? 'unified-llm-provider',
+    ...endpoint.headers,
+  };
+  return { url, headers };
+}
+
 export async function sendRequest(
   endpoint: EndpointConfig,
   body: unknown,
@@ -160,13 +178,8 @@ export async function sendRequest(
   signal?: AbortSignal,
   _loggingDir?: string,
 ): Promise<Response> {
-  const url = stream ? (endpoint.streamUrl ?? endpoint.url) : endpoint.url;
+  const { url, headers } = buildRequestTransport(endpoint, stream);
   const effectiveTimeout = timeout ?? (stream ? (endpoint.streamTimeoutMs ?? DEFAULT_STREAM_TIMEOUT) : (endpoint.timeoutMs ?? DEFAULT_TIMEOUT));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'User-Agent': endpoint.userAgent ?? 'unified-llm-provider',
-    ...endpoint.headers,
-  };
 
   await callDebugHookSafely(endpoint.debug?.onRequest, {
     url,
