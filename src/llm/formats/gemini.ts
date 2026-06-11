@@ -8,6 +8,7 @@
 import { LLMRequest, LLMResponse, LLMStreamChunk } from '../../types.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { sanitizeSchemaForGemini } from './schema-sanitizer.js';
+import { mapGeminiThinkingLevel } from './thinking-level.js';
 
 export class GeminiFormat implements FormatAdapter {
 
@@ -18,6 +19,9 @@ export class GeminiFormat implements FormatAdapter {
 
     // 降级工具 schema（Gemini 对 JSON Schema 支持最严格）
     sanitizeToolSchemas(filtered, sanitizeSchemaForGemini);
+
+    // thinkingBudget / thinkingLevel 表示用户开启思考；Gemini 下自动补 includeThoughts=true。
+    normalizeThinkingConfigForGemini(filtered);
 
     // 针对 Gemini 渠道，将 thoughtSignatures.gemini 映射回 thoughtSignature 字段发送
     mapSignaturesToProvider(filtered);
@@ -194,6 +198,32 @@ function filterInternalFields(obj: unknown): unknown {
     result[key] = filterInternalFields(value);
   }
   return result;
+}
+
+function normalizeThinkingConfigForGemini(request: unknown): void {
+  if (!request || typeof request !== 'object') return;
+  const req = request as Record<string, any>;
+  const thinkingConfig = req.generationConfig?.thinkingConfig;
+  if (!thinkingConfig || typeof thinkingConfig !== 'object' || Array.isArray(thinkingConfig)) return;
+
+  const mappedLevel = mapGeminiThinkingLevel(thinkingConfig.thinkingLevel);
+  if (mappedLevel) {
+    thinkingConfig.thinkingLevel = mappedLevel;
+  } else {
+    delete thinkingConfig.thinkingLevel;
+  }
+
+  if (
+    thinkingConfig.includeThoughts === undefined
+    && (
+      thinkingConfig.thinkingBudget !== undefined
+      || mappedLevel !== undefined
+    )
+  ) {
+    thinkingConfig.includeThoughts = true;
+  }
+
+  if (Object.keys(thinkingConfig).length === 0) delete req.generationConfig.thinkingConfig;
 }
 
 /** 将内部统一的 thoughtSignatures 映射回 Provider 预期的字段（如 Gemini 的 thoughtSignature） */

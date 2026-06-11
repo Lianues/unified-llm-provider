@@ -16,7 +16,7 @@ export function createDeepSeekProvider(config: LLMConfig): LLMProvider {
   const baseUrl = (config.baseUrl || defaults.baseUrl || '').replace(/\/+$/, '');
 
   return new LLMProvider(
-    new OpenAICompatibleFormat(model),
+    new OpenAICompatibleFormat(model, 'deepseek'),
     {
       url: config.endpoint?.url || `${baseUrl}/chat/completions`,
       streamUrl: config.endpoint?.streamUrl,

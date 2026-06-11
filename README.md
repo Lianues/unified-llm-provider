@@ -455,6 +455,11 @@ const request = {
     topP: 0.9,
     topK: 40,
     maxOutputTokens: 1024,
+    thinkingConfig: {
+      includeThoughts: true,
+      thinkingBudget: 10000,
+      thinkingLevel: 'high',
+    },
   },
 };
 ```
@@ -467,6 +472,42 @@ const request = {
 | `topP` | `generationConfig.topP` | `top_p` | `top_p` | `top_p` |
 | `topK` | `generationConfig.topK` | `top_k` | 默认不映射 | 默认不映射 |
 | `maxOutputTokens` | `generationConfig.maxOutputTokens` | `max_tokens` | `max_tokens` | `max_output_tokens` |
+| `thinkingConfig.includeThoughts` | `generationConfig.thinkingConfig.includeThoughts` | 忽略 | 忽略 | 忽略 |
+| `thinkingConfig.thinkingBudget` | `generationConfig.thinkingConfig.thinkingBudget`；未显式传 `includeThoughts` 时自动补 `includeThoughts: true` | 无有效 `thinkingLevel` 时映射为 `thinking: { type: 'enabled', budget_tokens }` | 默认不映射 | 默认不映射 |
+| `thinkingConfig.thinkingLevel` | 仅支持 `minimal/low/medium/high` | 支持 `none/low/medium/high/xhigh/max` | 支持 `none/minimal/low/medium/high/xhigh` | 支持 `none/minimal/low/medium/high/xhigh` |
+
+思考参数规则：
+
+- `not-set` / `non-set` 表示不发送思考等级相关字段，让上游按默认策略处理。
+- 对某个 provider 不属于自身支持集合的 `thinkingLevel`，也按 `not-set` 处理，不发送对应思考字段。
+- `includeThoughts` 只对 Gemini 原生请求有效；Claude / OpenAI 系会忽略统一字段里的 `includeThoughts`。
+- 传入 `thinkingBudget` 或有效的 `thinkingLevel` 且没有显式传 `includeThoughts` 时，Gemini 请求里会自动补 `includeThoughts: true`；如果显式传 `includeThoughts: false`，则保留 `false`。
+
+各 provider 的 `thinkingLevel` 映射：
+
+| provider | 支持等级 | 映射 |
+|---|---|---|
+| Gemini | `minimal/low/medium/high` | `generationConfig.thinkingConfig.thinkingLevel = level`，并在未显式传 `includeThoughts` 时补 `includeThoughts: true` |
+| Claude | `none` | `thinking: { type: 'disabled' }` |
+| Claude | `low/medium/high/xhigh/max` | `thinking: { type: 'adaptive' }` + `output_config: { effort: level }` |
+| OpenAI Chat / OpenAI Compatible | `none/minimal/low/medium/high/xhigh` | `reasoning_effort = level` |
+| OpenAI Responses | `none/minimal/low/medium/high/xhigh` | `reasoning: { effort: level, summary: 'auto' }` |
+| DeepSeek | `none` | `thinking: { type: 'disabled' }` |
+| DeepSeek | `high/max` | `thinking: { type: 'enabled' }` + `reasoning_effort = level` |
+
+Claude 的 `thinkingBudget` 映射为：
+
+```json
+{
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 10000
+  }
+}
+```
+
+如果同时传入 Claude 支持的 `thinkingLevel` 和 `thinkingBudget`，优先使用 `thinkingLevel` 的映射；如需强制改写最终 provider 原生字段，可用 `requestBody` 覆盖。
+
 
 `requestBody` 是 provider 原生请求体补丁，会在格式转换完成后再深合并到最终 body，因此它可以覆盖上面这些统一参数生成出来的字段：
 

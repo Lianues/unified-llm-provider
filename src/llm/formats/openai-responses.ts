@@ -14,6 +14,7 @@ import { isDocumentMimeType } from '../vision.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
+import { mapOpenAIResponsesThinkingLevel } from './thinking-level.js';
 
 export class OpenAIResponsesFormat implements FormatAdapter {
   constructor(private model: string) {}
@@ -140,6 +141,14 @@ export class OpenAIResponsesFormat implements FormatAdapter {
       if (gc.maxOutputTokens !== undefined) body.max_output_tokens = gc.maxOutputTokens;
       if (gc.temperature !== undefined) body.temperature = gc.temperature;
       if (gc.topP !== undefined) body.top_p = gc.topP;
+
+      const thinkingLevel = mapOpenAIResponsesThinkingLevel(gc.thinkingConfig?.thinkingLevel);
+      if (thinkingLevel) {
+        body.reasoning = {
+          effort: thinkingLevel,
+          summary: 'auto',
+        };
+      }
     }
 
     if (stream) body.stream = true;

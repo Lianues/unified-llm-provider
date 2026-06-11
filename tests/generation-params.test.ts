@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createClaudeProvider,
+  createDeepSeekProvider,
   createGeminiProvider,
   createOpenAICompatibleProvider,
   createOpenAIResponsesProvider,
@@ -119,4 +120,216 @@ describe('unified generation params', () => {
       maxOutputTokens: 256,
     });
   });
+
+  it('Gemini thinkingBudget/thinkingLevel 在未显式设置 includeThoughts 时会自动补 includeThoughts=true', async () => {
+    const provider = createGeminiProvider({
+      provider: 'gemini',
+      model: 'gemini-test',
+      apiKey: 'gemini-key',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          thinkingBudget: 10000,
+          thinkingLevel: 'high',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+    const body = dry.body as any;
+
+    expect(body.generationConfig.thinkingConfig).toMatchObject({
+      thinkingBudget: 10000,
+      thinkingLevel: 'high',
+      includeThoughts: true,
+    });
+  });
+
+  it('Gemini 显式传 includeThoughts=false 时保留 false，不会因 thinkingBudget 自动改成 true', async () => {
+    const provider = createGeminiProvider({
+      provider: 'gemini',
+      model: 'gemini-test',
+      apiKey: 'gemini-key',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          includeThoughts: false,
+          thinkingBudget: 10000,
+          thinkingLevel: 'high',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+    const body = dry.body as any;
+
+    expect(body.generationConfig.thinkingConfig).toMatchObject({
+      thinkingBudget: 10000,
+      thinkingLevel: 'high',
+      includeThoughts: false,
+    });
+  });
+
+  it('Gemini 不支持的 thinkingLevel 视为 non-set，不发送 thinkingConfig', async () => {
+    const provider = createGeminiProvider({
+      provider: 'gemini',
+      model: 'gemini-test',
+      apiKey: 'gemini-key',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          thinkingLevel: 'max',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((dry.body as any).generationConfig?.thinkingConfig).toBeUndefined();
+  });
+
+
+  it('Claude 将 thinkingBudget 映射为 thinking.enabled + budget_tokens，并忽略 includeThoughts', async () => {
+    const provider = createClaudeProvider({
+      provider: 'claude',
+      model: 'claude-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.anthropic.test/v1',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          includeThoughts: false,
+          thinkingBudget: 10000,
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+    const body = dry.body as any;
+
+    expect(body.thinking).toEqual({
+      type: 'enabled',
+      budget_tokens: 10000,
+    });
+    expect(JSON.stringify(body)).not.toContain('includeThoughts');
+  });
+
+  it('Claude 将支持的 thinkingLevel 映射为 adaptive effort / disabled，unsupported level 视为 non-set', async () => {
+    const provider = createClaudeProvider({
+      provider: 'claude',
+      model: 'claude-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.anthropic.test/v1',
+    });
+
+    const high = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'high' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((high.body as any).thinking).toEqual({ type: 'adaptive' });
+    expect((high.body as any).output_config).toEqual({ effort: 'high' });
+
+    const none = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'none' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((none.body as any).thinking).toEqual({ type: 'disabled' });
+    expect((none.body as any).output_config).toBeUndefined();
+
+    const unsupported = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'minimal' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((unsupported.body as any).thinking).toBeUndefined();
+    expect((unsupported.body as any).output_config).toBeUndefined();
+  });
+
+  it('OpenAI compatible 将支持的 thinkingLevel 映射为 reasoning_effort，unsupported level 视为 non-set', async () => {
+    const provider = createOpenAICompatibleProvider({
+      provider: 'openai-compatible',
+      model: 'gpt-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          thinkingLevel: 'medium',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+    expect((dry.body as any).reasoning_effort).toBe('medium');
+
+    const unsupported = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'max' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((unsupported.body as any).reasoning_effort).toBeUndefined();
+  });
+
+  it('OpenAI Responses 将支持的 thinkingLevel 映射为 reasoning.effort + summary=auto', async () => {
+    const provider = createOpenAIResponsesProvider({
+      provider: 'openai-responses',
+      model: 'gpt-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'high' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((dry.body as any).reasoning).toEqual({
+      effort: 'high',
+      summary: 'auto',
+    });
+  });
+
+  it('DeepSeek 只映射 none/high/max thinkingLevel，其它等级视为 non-set', async () => {
+    const provider = createDeepSeekProvider({
+      provider: 'deepseek',
+      model: 'deepseek-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.deepseek.test/v1',
+    });
+
+    const high = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'high' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((high.body as any).thinking).toEqual({ type: 'enabled' });
+    expect((high.body as any).reasoning_effort).toBe('high');
+
+    const none = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'none' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((none.body as any).thinking).toEqual({ type: 'disabled' });
+    expect((none.body as any).reasoning_effort).toBeUndefined();
+
+    const unsupported = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'medium' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((unsupported.body as any).thinking).toBeUndefined();
+    expect((unsupported.body as any).reasoning_effort).toBeUndefined();
+  });
+
 });

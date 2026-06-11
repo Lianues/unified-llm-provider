@@ -11,6 +11,7 @@ import {
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForClaude } from './schema-sanitizer.js';
+import { mapClaudeThinkingLevel } from './thinking-level.js';
 
 export class ClaudeFormat implements FormatAdapter {
   constructor(private model: string, private promptCaching?: boolean, private autoCaching?: boolean) {}
@@ -158,6 +159,19 @@ export class ClaudeFormat implements FormatAdapter {
     if (gc?.temperature !== undefined) body.temperature = gc.temperature;
     if (gc?.topP !== undefined) body.top_p = gc.topP;
     if (gc?.topK !== undefined) body.top_k = gc.topK;
+
+    const thinkingLevel = mapClaudeThinkingLevel(gc?.thinkingConfig?.thinkingLevel);
+    if (thinkingLevel === 'none') {
+      body.thinking = { type: 'disabled' };
+    } else if (thinkingLevel) {
+      body.thinking = { type: 'adaptive' };
+      body.output_config = { effort: thinkingLevel };
+    } else if (typeof gc?.thinkingConfig?.thinkingBudget === 'number') {
+      body.thinking = {
+        type: 'enabled',
+        budget_tokens: gc.thinkingConfig.thinkingBudget,
+      };
+    }
 
     // 流式参数
     if (stream) body.stream = true;

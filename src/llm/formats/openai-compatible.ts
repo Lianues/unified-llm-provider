@@ -14,9 +14,10 @@ import {
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
+import { mapDeepSeekThinkingLevel, mapOpenAIThinkingLevel } from './thinking-level.js';
 
 export class OpenAICompatibleFormat implements FormatAdapter {
-  constructor(private model: string) {}
+  constructor(private model: string, private providerKind: 'openai-compatible' | 'deepseek' = 'openai-compatible') {}
 
   // ============ 编码请求：Gemini → OpenAI ============
 
@@ -148,6 +149,19 @@ export class OpenAICompatibleFormat implements FormatAdapter {
       if (gc.topP !== undefined) body.top_p = gc.topP;
       if (gc.maxOutputTokens !== undefined) body.max_tokens = gc.maxOutputTokens;
       if (gc.stopSequences !== undefined) body.stop = gc.stopSequences;
+
+      if (this.providerKind === 'deepseek') {
+        const thinkingLevel = mapDeepSeekThinkingLevel(gc.thinkingConfig?.thinkingLevel);
+        if (thinkingLevel === 'none') {
+          body.thinking = { type: 'disabled' };
+        } else if (thinkingLevel === 'high' || thinkingLevel === 'max') {
+          body.thinking = { type: 'enabled' };
+          body.reasoning_effort = thinkingLevel;
+        }
+      } else {
+        const thinkingLevel = mapOpenAIThinkingLevel(gc.thinkingConfig?.thinkingLevel);
+        if (thinkingLevel) body.reasoning_effort = thinkingLevel;
+      }
     }
 
     // 流式参数

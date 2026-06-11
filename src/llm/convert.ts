@@ -4,6 +4,7 @@ import { normalizeCallId } from './formats/tool-call-ids.js';
 import { normalizeLLMRequestThoughtSignatures, normalizeLLMResponseThoughtSignatures, normalizeLLMStreamChunkThoughtSignatures, detectLLMRequestSignatureRepresentation } from '../signatures/normalize.js';
 import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignatures, serializeLLMStreamChunkThoughtSignatures } from '../signatures/serialize.js';
 import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
+import { normalizeThinkingLevel } from './formats/thinking-level.js';
 
 export type UnifiedFormatId = 'unified';
 export type WireFormatId = 'gemini' | 'claude' | 'openai-compatible' | 'openai-responses' | 'deepseek';
@@ -275,6 +276,18 @@ function decodeClaudeRequest(raw: unknown): LLMRequest {
       ? [{ text: data.system }]
       : undefined;
 
+  const thinkingBudget = typeof data.thinking?.budget_tokens === 'number'
+    ? data.thinking.budget_tokens
+    : undefined;
+  const thinkingLevel = data.thinking?.type === 'disabled'
+    ? 'none'
+    : normalizeThinkingLevel(data.output_config?.effort);
+  const thinkingConfig = {
+    ...(thinkingBudget !== undefined || thinkingLevel ? { includeThoughts: true } : {}),
+    ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
+    ...(thinkingLevel ? { thinkingLevel } : {}),
+  };
+
   return normalizeLLMRequestThoughtSignatures({
     contents,
     systemInstruction: systemParts ? { parts: systemParts } : undefined,
@@ -284,6 +297,7 @@ function decodeClaudeRequest(raw: unknown): LLMRequest {
       ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
       ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
       ...(typeof data.top_k === 'number' ? { topK: data.top_k } : {}),
+      ...(Object.keys(thinkingConfig).length > 0 ? { thinkingConfig } : {}),
     },
   }, { formatHint: 'claude' });
 }
@@ -379,6 +393,7 @@ function decodeOpenAICompatibleRequest(raw: unknown): LLMRequest {
       ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
       ...(typeof data.max_tokens === 'number' ? { maxOutputTokens: data.max_tokens } : {}),
       ...(Array.isArray(data.stop) ? { stopSequences: data.stop } : {}),
+      ...(normalizeThinkingLevel(data.reasoning_effort) ? { thinkingConfig: { thinkingLevel: normalizeThinkingLevel(data.reasoning_effort) } } : {}),
     },
   }, { formatHint: 'openai-compatible' });
 }
@@ -484,6 +499,7 @@ function decodeOpenAIResponsesRequest(raw: unknown): LLMRequest {
       ...(typeof data.max_output_tokens === 'number' ? { maxOutputTokens: data.max_output_tokens } : {}),
       ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
       ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
+      ...(normalizeThinkingLevel(data.reasoning?.effort) ? { thinkingConfig: { thinkingLevel: normalizeThinkingLevel(data.reasoning.effort) } } : {}),
     },
   }, { formatHint: 'openai-responses' });
 }

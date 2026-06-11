@@ -7,6 +7,16 @@
 import { Content, Part, UsageMetadata, FunctionCallPart } from './message.js';
 import { FunctionDeclaration } from './tool.js';
 
+export interface LLMThinkingConfig {
+  /** 是否要求 Gemini 返回 thought parts。仅 Gemini 原生生效；其它 provider 会忽略该统一字段。 */
+  includeThoughts?: boolean;
+  /** 思考预算 token。Gemini 原生透传；Claude 映射为 thinking.budget_tokens；OpenAI 系默认忽略。 */
+  thinkingBudget?: number;
+  /** 思考强度等级。当前 Gemini 原生透传；Claude/OpenAI 系默认忽略。 */
+  thinkingLevel?: string;
+  [key: string]: unknown;
+}
+
 /** 统一生成参数（允许 provider 扩展字段） */
 export interface LLMGenerationConfig {
   /** 控制随机性。映射到 OpenAI/Claude temperature、Gemini generationConfig.temperature。 */
@@ -18,6 +28,12 @@ export interface LLMGenerationConfig {
   /** 最大输出 token。映射到 OpenAI Chat/Claude max_tokens、OpenAI Responses max_output_tokens。 */
   maxOutputTokens?: number;
   stopSequences?: string[];
+  /**
+   * 统一思考配置。
+   * 规则：传入 thinkingBudget 或 thinkingLevel 时，Gemini 会自动视为 includeThoughts=true；
+   * Claude 只映射 thinkingBudget；OpenAI 系默认忽略整个 thinkingConfig。
+   */
+  thinkingConfig?: LLMThinkingConfig;
   /**
    * 允许暂存后续统一字段或 provider 扩展字段；真正无损透传请优先使用 LLMConfig.requestBody。
    */
