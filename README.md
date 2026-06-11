@@ -443,6 +443,69 @@ const provider = createLLMFromConfig({
 
 ---
 
+### 统一生成参数与 `requestBody` 覆盖规则
+
+统一请求体只把最常用的生成参数作为一等字段，命名采用 Gemini-like camelCase：
+
+```ts
+const request = {
+  contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+  generationConfig: {
+    temperature: 0.7,
+    topP: 0.9,
+    topK: 40,
+    maxOutputTokens: 1024,
+  },
+};
+```
+
+当前保证映射的字段：
+
+| unified / Gemini-like | Gemini | Claude | OpenAI Chat Completions | OpenAI Responses |
+|---|---|---|---|---|
+| `temperature` | `generationConfig.temperature` | `temperature` | `temperature` | `temperature` |
+| `topP` | `generationConfig.topP` | `top_p` | `top_p` | `top_p` |
+| `topK` | `generationConfig.topK` | `top_k` | 默认不映射 | 默认不映射 |
+| `maxOutputTokens` | `generationConfig.maxOutputTokens` | `max_tokens` | `max_tokens` | `max_output_tokens` |
+
+`requestBody` 是 provider 原生请求体补丁，会在格式转换完成后再深合并到最终 body，因此它可以覆盖上面这些统一参数生成出来的字段：
+
+```ts
+const provider = createLLMFromConfig({
+  provider: 'openai-compatible',
+  model: 'gpt-4o',
+  apiKey: process.env.OPENAI_API_KEY,
+  requestBody: {
+    // 覆盖 generationConfig.temperature / topP / maxOutputTokens 转换后的结果
+    temperature: 0.2,
+    top_p: 0.95,
+    max_tokens: 2048,
+  },
+}, registry.llmProviders);
+```
+
+对于 Gemini，覆盖路径保持 Gemini 原生结构：
+
+```ts
+requestBody: {
+  generationConfig: {
+    temperature: 0.2,
+    topP: 0.95,
+    topK: 32,
+    maxOutputTokens: 2048,
+  },
+}
+```
+
+优先级规则：
+
+1. 统一请求体 `generationConfig` 先转换成目标 provider 请求体；
+2. `config.requestBody` 再合并，覆盖统一参数生成的同名 provider 字段；
+3. 运行时 `patchRequestBodyOverrides()` 最后合并，优先级最高。
+
+---
+
+
 ### 获取模型列表：`listAvailableModels()`
 
 可以通过 `listAvailableModels()` 拉取 provider 的模型列表，并按用户指定格式返回。

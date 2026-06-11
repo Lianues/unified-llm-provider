@@ -117,7 +117,8 @@ export class LLMProvider implements LLMProviderLike {
     if (!this.runtimeOverrides && !this.staticOverrides) return undefined;
     if (!this.runtimeOverrides) return this.staticOverrides;
     if (!this.staticOverrides) return this.runtimeOverrides;
-    return deepMergeObjects(this.runtimeOverrides, this.staticOverrides);
+    // 优先级：统一请求体编码结果 < config.requestBody(static) < 运行时 patchRequestBodyOverrides(runtime)。
+    return deepMergeObjects(this.staticOverrides, this.runtimeOverrides);
   }
 
   private resolveInputFormat(options?: LLMCallOptions): FormatId {

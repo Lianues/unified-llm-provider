@@ -9,12 +9,18 @@ import { FunctionDeclaration } from './tool.js';
 
 /** 统一生成参数（允许 provider 扩展字段） */
 export interface LLMGenerationConfig {
+  /** 控制随机性。映射到 OpenAI/Claude temperature、Gemini generationConfig.temperature。 */
   temperature?: number;
+  /** nucleus sampling。统一使用 Gemini 风格 topP，映射到 OpenAI/Claude top_p。 */
   topP?: number;
+  /** token 候选采样数。Gemini 原生 topK，Claude 映射到 top_k；OpenAI 系默认不映射。 */
   topK?: number;
+  /** 最大输出 token。映射到 OpenAI Chat/Claude max_tokens、OpenAI Responses max_output_tokens。 */
   maxOutputTokens?: number;
   stopSequences?: string[];
-  /** 允许透传 provider 特有的嵌套参数，如 thinkingConfig */
+  /**
+   * 允许暂存后续统一字段或 provider 扩展字段；真正无损透传请优先使用 LLMConfig.requestBody。
+   */
   [key: string]: unknown;
 }
 
