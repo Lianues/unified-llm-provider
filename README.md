@@ -443,6 +443,107 @@ const provider = createLLMFromConfig({
 
 ---
 
+### 获取模型列表：`listAvailableModels()`
+
+可以通过 `listAvailableModels()` 拉取 provider 的模型列表，并按用户指定格式返回。
+
+```ts
+import { listAvailableModels } from 'unified-llm-provider';
+
+// 默认返回 unified 统一格式：{ provider, baseUrl, models: UnifiedModelInfo[] }
+const unified = await listAvailableModels({
+  provider: 'openai-compatible',
+  apiKey: process.env.OPENAI_API_KEY,
+  baseUrl: 'https://api.openai.com/v1',
+});
+
+// 也可以直接返回目标 API 的模型列表格式
+const openAIStyle = await listAvailableModels({
+  provider: 'gemini',
+  apiKey: process.env.GEMINI_API_KEY,
+  baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+  outputFormat: 'openai-compatible',
+});
+```
+
+支持的返回格式：
+
+- `unified`：包内统一简化格式，默认值；
+- `openai-compatible` / `openai-responses` / `deepseek` / `openai`：OpenAI `GET /v1/models` 风格：`{ object: 'list', data: [...] }`；
+- `claude`：Anthropic `GET /v1/models` 风格：`{ data: [...] }`；
+- `gemini`：Gemini `GET /v1beta/models` 风格：`{ models: [...] }`。
+
+#### `unified` 模型字段
+
+`unified` 的模型条目统一使用 Gemini 风格字段：Gemini 原生有的字段直接复用；其它 provider 的信息映射到同义字段；Gemini 没有但其它 provider 有价值的信息，用新增的 camelCase 字段保存。
+
+```ts
+interface UnifiedModelInfo {
+  /** 可直接用于调用接口的模型 ID。Gemini 优先用 baseModelId；没有时用去掉 models/ 前缀后的 name。 */
+  id: string;
+
+  /** Gemini 风格模型名。Gemini 通常为 models/xxx；OAI/Claude 使用自身 id。 */
+  name: string;
+
+  /** 展示名。上游没有 displayName/display_name 时回退为 id。 */
+  displayName: string;
+
+  /** Gemini 原生字段。只有上游提供或可明确映射时才返回。 */
+  baseModelId?: string;
+  version?: string;
+  description?: string;
+  inputTokenLimit?: number;   // Claude max_input_tokens 会映射到这里
+  outputTokenLimit?: number;  // Claude max_tokens 会映射到这里
+  supportedGenerationMethods?: string[];
+  temperature?: number;
+  maxTemperature?: number;
+  topP?: number;
+  topK?: number;
+
+  /** 新增统一字段。 */
+  ownedBy?: string;       // OpenAI owned_by / owner
+  createdAt?: string;     // Claude created_at；OpenAI created 会转换为 ISO 字符串
+  modelType?: string;     // OpenAI object / Claude type
+  capabilities?: unknown; // Claude capabilities 等能力详情
+
+  /** 兼容旧版 UI 的展示标签。 */
+  label?: string;
+
+  /** 上游原始模型对象，用于保留 provider 私有字段和无损转换。 */
+  raw?: unknown;
+}
+```
+
+映射规则：
+
+| 上游 | unified 字段 |
+|---|---|
+| Gemini `name` | `name`；同时去掉 `models/` 后可作为 `id` 回退 |
+| Gemini `baseModelId` / `displayName` / `inputTokenLimit` / `outputTokenLimit` / `supportedGenerationMethods` / 采样参数 | 同名 camelCase 字段 |
+| OpenAI `id` | `id`、`name`、`displayName` 回退 |
+| OpenAI `owned_by` / `created` / `object` | `ownedBy` / `createdAt` + `created` / `modelType` |
+| Claude `id` / `display_name` / `created_at` / `type` | `id` + `name` / `displayName` / `createdAt` / `modelType` |
+| Claude `max_input_tokens` / `max_tokens` / `capabilities` | `inputTokenLimit` / `outputTokenLimit` / `capabilities` |
+
+实际请求端点：
+
+| provider | 请求端点 | 认证 |
+|---|---|---|
+| OpenAI 兼容 / OpenAI Responses / DeepSeek | `GET {baseUrl}/models?limit=1000`，如返回 `has_more` 会继续用 `after={last_id}` 拉取后续页 | `Authorization: Bearer ...` |
+| Claude | `GET {baseUrl}/models?limit=1000`，如返回 `has_more` 会继续用 `after_id={last_id}` 拉取后续页 | `x-api-key` + `anthropic-version: 2023-06-01` |
+| Gemini | `GET {baseUrl}/models?key=...&pageSize=1000`，如返回 `nextPageToken` 会继续分页 | query 参数 `key=` |
+
+说明：
+
+- 默认 `pageSize` / `limit` 为 `1000`，避免只拿到默认分页的 100 条；可通过 `pageSize` 覆盖。
+- 如果上游仍然返回分页游标，会在内部自动继续拉取直到完整列表；返回给下游时不暴露 `nextPageToken` / `first_id` / `last_id` / `has_more` 这类分页字段。
+- 返回模型对象时会尽量保留上游原始字段，并放在统一字段和 `raw` 中；转换格式时只补齐目标格式必要结构字段（如顶层 `object: 'list'`、模型 `id` / `name` / `displayName`）。
+- 对 `created`、`owned_by`、`capabilities`、`supportedGenerationMethods` 等可选信息：上游提供就保留或映射；上游没有提供就不返回该字段。
+- Gemini 会优先使用 `baseModelId` 作为对外模型 `id`；没有显示名称（`displayName` / `display_name`）时，会直接使用 `id`。
+- `format` 可作为 `outputFormat` 的别名。
+
+---
+
 ### 显式指定代理
 
 可以在 provider 配置上直接传代理地址：
@@ -794,6 +895,7 @@ curl -X POST 'https://api.anthropic.com/v1/messages' \
 - thought signature 跟随格式自动处理
 - 调试钩子 `onRequest` / `onResponse` / `onStreamChunk`
 - 显式代理配置 `proxy`
+- 模型列表拉取与 OpenAI / Claude / Gemini 格式转换
 
 已验证通过：
 
