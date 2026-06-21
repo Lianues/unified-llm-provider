@@ -34,6 +34,7 @@ export interface LLMDebugHooks {
 export interface LLMEndpointOverride {
   url?: string;
   streamUrl?: string;
+  compactUrl?: string;
   headers?: Record<string, string>;
   /** 显式指定此 endpoint 使用的 HTTP/HTTPS 代理 */
   proxy?: LLMProxyOption;

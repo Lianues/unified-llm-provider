@@ -4,8 +4,8 @@
  * 管理一组按 modelName 注册的模型，并维护当前活动模型。
  */
 
-import type { LLMDryRunOptions, LLMDryRunResult, LLMCallOptions, LLMProviderLike } from './providers/base.js';
-import { LLMResponse, LLMStreamChunk } from '../types.js';
+import type { LLMDryRunOptions, LLMDryRunResult, LLMCallOptions, LLMCompactOptions, LLMProviderLike } from './providers/base.js';
+import { LLMCompactResponse, LLMResponse, LLMStreamChunk } from '../types.js';
 import type { LLMConfig } from '../config/types.js';
 
 export type LLMModelName = string;
@@ -158,6 +158,20 @@ export class LLMRouter {
   /** Dry Run：只构建目标模型的真实 HTTP 请求，不发送网络请求 */
   async dryRun(request: unknown, modelName?: LLMModelName, options?: LLMDryRunOptions): Promise<LLMDryRunResult> {
     return this.resolve(modelName).dryRun(request, options);
+  }
+
+  /** Compact：调用目标模型的无状态压缩端点（如果 provider 支持） */
+  async compact<TOutput = LLMCompactResponse>(request: unknown, modelName?: LLMModelName, options?: LLMCompactOptions): Promise<TOutput> {
+    const provider = this.resolve(modelName);
+    if (!provider.compact) throw new Error(`当前 provider 不支持 compact: ${provider.name}`);
+    return provider.compact<TOutput>(request, options);
+  }
+
+  /** Compact Dry Run：只构建 compact HTTP 请求，不发送网络请求 */
+  async compactDryRun(request: unknown, modelName?: LLMModelName, options?: LLMCompactOptions & { curl?: LLMDryRunOptions['curl'] }): Promise<LLMDryRunResult> {
+    const provider = this.resolve(modelName);
+    if (!provider.compactDryRun) throw new Error(`当前 provider 不支持 compactDryRun: ${provider.name}`);
+    return provider.compactDryRun(request, options);
   }
 
   /** 运行时浅合并当前模型的 requestBody 覆盖 */

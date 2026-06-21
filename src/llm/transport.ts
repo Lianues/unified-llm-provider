@@ -12,6 +12,8 @@ export interface EndpointConfig {
   url: string;
   /** 流式请求 URL（与非流式不同时使用，如 Gemini），默认同 url */
   streamUrl?: string;
+  /** compact / compaction 请求 URL（可选） */
+  compactUrl?: string;
   /** 请求头（不含 Content-Type，内部自动加） */
   headers: Record<string, string>;
   /** 自定义 fetch 实现 */

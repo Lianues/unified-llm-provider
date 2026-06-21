@@ -546,6 +546,93 @@ requestBody: {
 
 ---
 
+### OpenAI Responses 无状态压缩：`compact()`
+
+`openai-responses` provider 支持 OpenAI 的 `POST /v1/responses/compact` 无状态压缩端点。调用时不使用 `previous_response_id`，而是把当前上下文窗口作为 `input` 发送给 compact 端点。
+
+```ts
+import { createOpenAIResponsesProvider } from 'unified-llm-provider';
+
+const provider = createOpenAIResponsesProvider({
+  provider: 'openai-responses',
+  model: 'gpt-5.4',
+  apiKey: process.env.OPENAI_API_KEY,
+  baseUrl: 'https://api.openai.com/v1',
+});
+
+const compacted = await provider.compact({
+  contents: [
+    { role: 'user', parts: [{ text: 'Create a landing page.' }] },
+    { role: 'model', parts: [{ text: '...' }] },
+  ],
+});
+
+// 客户端维护 compact 后的上下文窗口；下一轮调用仍然走本包的 provider.chat。
+const response = await provider.chat({
+  contents: [
+    ...compacted.contents,
+    { role: 'user', parts: [{ text: '继续修改配色' }] },
+  ],
+});
+```
+
+compact 返回的是统一结构：
+
+```ts
+interface LLMCompactResponse {
+  id?: string;
+  object?: string;       // OpenAI: response.compaction
+  createdAt?: number;
+  contents: Content[];   // compact 后的下一轮上下文窗口
+  usageMetadata?: UsageMetadata;
+  rawResponse?: unknown;
+}
+```
+
+OpenAI 返回的：
+
+```json
+{ "type": "compaction", "encrypted_content": "..." }
+```
+
+会在 unified 里保存为 `providerContext` part：
+
+```ts
+{
+  role: 'model',
+  parts: [{
+    providerContext: {
+      provider: 'openai',
+      format: 'openai-responses',
+      endpoint: 'responses.compact',
+      itemType: 'compaction',
+      encryptedContent: '...',
+      rawItem: { type: 'compaction', encrypted_content: '...' }
+    }
+  }]
+}
+```
+
+`providerContext` 表示 provider 原生、不透明、通常不可跨厂商转换的上下文状态。它的规则类似 thought signature：**不会伪造成其他 provider 可用的状态**；当后续仍然调用 `openai-responses` 时，本包会优先把 `rawItem` 原样回放到 Responses `input` 里。
+
+如果你想完全维护 OpenAI 原生 compact response，也可以指定：
+
+```ts
+const raw = await provider.compact(request, {
+  outputFormat: 'openai-responses',
+});
+```
+
+`compactDryRun()` 可用于查看实际请求，不会发送网络请求：
+
+```ts
+const dry = await provider.compactDryRun(request);
+console.log(dry.url);  // https://api.openai.com/v1/responses/compact
+console.log(dry.body);
+```
+
+---
+
 
 ### 获取模型列表：`listAvailableModels()`
 

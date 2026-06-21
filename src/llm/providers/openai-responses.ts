@@ -17,6 +17,7 @@ export function createOpenAIResponsesProvider(config: LLMConfig): LLMProvider {
     {
       url: config.endpoint?.url || `${baseUrl}/responses`,
       streamUrl: config.endpoint?.streamUrl,
+      compactUrl: config.endpoint?.compactUrl || `${baseUrl}/responses/compact`,
       headers: {
         Authorization: `Bearer ${config.apiKey ?? ''}`,
         ...config.headers,

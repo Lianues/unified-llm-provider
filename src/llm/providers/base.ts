@@ -4,14 +4,15 @@
 
 import type { LLMRequest, LLMResponse, LLMStreamChunk } from '../../types/index.js';
 import type { FormatId, UnifiedSignatureMode } from '../convert.js';
-import { decodeRequestFromFormat, encodeResponseToFormat, encodeStreamChunkToFormat, normalizeFormatId } from '../convert.js';
-import type { FormatAdapter } from '../formats/types.js';
+import { decodeRequestFromFormat, encodeCompactResponseToFormat, encodeResponseToFormat, encodeStreamChunkToFormat, normalizeFormatId } from '../convert.js';
+import { isCompactFormatAdapter, type FormatAdapter } from '../formats/types.js';
 import { detectLLMRequestSignatureRepresentation } from '../../signatures/normalize.js';
 import { buildRequestTransport, sendRequest, type EndpointConfig } from '../transport.js';
 import type { LLMProxyOption } from '../../config/types.js';
 import { processResponse, processStreamResponse } from '../response.js';
 import type { FormatRegistry } from '../../registry/formats.js';
 import { bodyToCurlPayload, formatRequestAsCurl, type CurlFormatOptions } from '../debug-utils.js';
+import type { LLMCompactResponse } from '../../types/llm.js';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -50,6 +51,11 @@ export interface LLMCallOptions {
   formatRegistry?: Pick<FormatRegistry, 'get'>;
   /** 本次调用显式指定 HTTP/HTTPS 代理；传空字符串可临时禁用 provider 默认代理 */
   proxy?: LLMProxyOption;
+}
+
+export interface LLMCompactOptions extends LLMCallOptions {
+  /** 仅 compact 调用使用的额外请求体字段，会深合并到 compact 编码结果中。 */
+  requestBody?: Record<string, unknown>;
 }
 
 export interface LLMDryRunOptions extends LLMCallOptions {
@@ -92,6 +98,8 @@ export interface LLMProviderLike {
   chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput>;
   chatStream<TOutput = LLMStreamChunk>(request: unknown, options?: LLMCallOptions): AsyncGenerator<TOutput>;
   dryRun(request: unknown, options?: LLMDryRunOptions): Promise<LLMDryRunResult>;
+  compact?<TOutput = LLMCompactResponse>(request: unknown, options?: LLMCompactOptions): Promise<TOutput>;
+  compactDryRun?(request: unknown, options?: LLMCompactOptions & { curl?: CurlFormatOptions }): Promise<LLMDryRunResult>;
   patchRequestBodyOverrides?(patch: Record<string, unknown>): void;
   removeRequestBodyOverridePaths?(...paths: string[]): void;
   removeRequestBodyOverrideKeys?(...keys: string[]): void;
@@ -163,6 +171,46 @@ export class LLMProvider implements LLMProviderLike {
     };
   }
 
+  private buildCompactProviderRequest(request: unknown, options: LLMCompactOptions | undefined): BuiltProviderRequest {
+    if (!isCompactFormatAdapter(this.format)) {
+      throw new Error(`${this.providerName} 不支持 compact 端点`);
+    }
+
+    const inputFormat = this.resolveInputFormat(options);
+    const outputFormat = this.resolveOutputFormat(inputFormat, options);
+    const canonicalRequest = decodeRequestFromFormat(request, {
+      format: inputFormat,
+      registry: options?.formatRegistry,
+    });
+
+    if (options?.requestBody && 'previous_response_id' in options.requestBody) {
+      throw new Error('stateless compact 不支持 previous_response_id；请通过 input 传入完整上下文窗口');
+    }
+
+    const body = mergeRequestBody(this.format.encodeCompactRequest(canonicalRequest), options?.requestBody);
+    if (isPlainObject(body) && 'previous_response_id' in body) {
+      throw new Error('stateless compact 不支持 previous_response_id；请通过 input 传入完整上下文窗口');
+    }
+
+    const endpoint = this.resolveEndpoint(options);
+    if (!endpoint.compactUrl) {
+      throw new Error(`${this.providerName} 未配置 compactUrl`);
+    }
+    const compactEndpoint: EndpointConfig = { ...endpoint, url: endpoint.compactUrl };
+    const { url, headers } = buildRequestTransport(compactEndpoint, false);
+
+    return {
+      inputFormat,
+      outputFormat,
+      canonicalRequest,
+      endpoint: compactEndpoint,
+      url,
+      headers,
+      body,
+    };
+  }
+
+
   setLogging(logsDir: string): void {
     this.loggingDir = logsDir;
   }
@@ -189,6 +237,51 @@ export class LLMProvider implements LLMProviderLike {
       timestamp: Date.now(),
     };
   }
+
+
+  async compactDryRun(request: unknown, options?: LLMCompactOptions & { curl?: CurlFormatOptions }): Promise<LLMDryRunResult> {
+    const built = this.buildCompactProviderRequest(request, options);
+    const curlOptions: CurlFormatOptions = {
+      includeApiKey: false,
+      prettyBody: true,
+      ...options?.curl,
+    };
+    return {
+      url: built.url,
+      method: 'POST',
+      stream: false,
+      headers: built.headers,
+      body: built.body,
+      bodyText: bodyToCurlPayload(built.body),
+      curl: formatRequestAsCurl(built.url, built.headers, built.body, curlOptions),
+      providerName: this.providerName,
+      inputFormat: built.inputFormat,
+      outputFormat: built.outputFormat,
+      timestamp: Date.now(),
+    };
+  }
+
+  async compact<TOutput = LLMCompactResponse>(request: unknown, options?: LLMCompactOptions): Promise<TOutput> {
+    const built = this.buildCompactProviderRequest(request, options);
+    const res = await sendRequest(built.endpoint, built.body, false, undefined, options?.signal, this.loggingDir);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`LLM Compact API 错误 (${res.status}): ${text}`);
+    }
+
+    const raw = await res.json();
+    if (!isCompactFormatAdapter(this.format)) {
+      throw new Error(`${this.providerName} 不支持 compact 端点`);
+    }
+    const compactResponse = this.format.decodeCompactResponse(raw);
+
+    return encodeCompactResponseToFormat(compactResponse, {
+      format: built.outputFormat,
+      sourceFormat: this.providerFormat,
+      registry: options?.formatRegistry,
+    }) as TOutput;
+  }
+
 
   async chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput> {
     const built = this.buildProviderRequest(request, options, false);

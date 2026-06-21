@@ -26,6 +26,34 @@ export interface TextPart {
   thoughtDurationMs?: number;
 }
 
+/**
+ * Provider 原生上下文状态项。
+ *
+ * 用于保存 compact / cache / opaque state 等无法跨厂商语义化转换、但需要在同一
+ * provider / wire format 后续调用中原样回放的内容。
+ */
+export interface ProviderContextItem {
+  /** 厂商命名，例如 openai / anthropic / google / deepseek */
+  provider: string;
+  /** wire format / 接口族，例如 openai-responses / claude */
+  format: string;
+  /** 产生或适用的接口，例如 responses.compact / responses */
+  endpoint?: string;
+  /** provider 原生 item.type，例如 compaction / message / reasoning */
+  itemType: string;
+  /** provider 原生 item id */
+  id?: string;
+  /** 常见不透明加密上下文内容的便捷字段 */
+  encryptedContent?: string;
+  /** provider 原生 item；目标 format 匹配时应优先原样回放 */
+  rawItem: unknown;
+}
+
+/** Provider 原生上下文状态 part（如 OpenAI Responses compaction item） */
+export interface ProviderContextPart {
+  providerContext: ProviderContextItem;
+}
+
 /** 内联数据部分（图片等二进制数据，base64 编码） */
 export interface InlineDataPart {
   inlineData: {
@@ -63,7 +91,7 @@ export interface FunctionResponsePart {
 }
 
 /** 消息部分的联合类型 */
-export type Part = TextPart | InlineDataPart | FunctionCallPart | FunctionResponsePart;
+export type Part = TextPart | InlineDataPart | FunctionCallPart | FunctionResponsePart | ProviderContextPart;
 
 /** 消息角色 */
 export type Role = 'user' | 'model';
@@ -93,6 +121,8 @@ export interface UsageMetadata {
 export interface Content {
   role: Role;
   parts: Part[];
+  /** provider 原生顶层 item 元数据；同 format 回放时可用于保留 id/status/phase 等字段 */
+  providerContext?: ProviderContextItem;
   /** 该轮 API 调用的 Token 用量（存储用，组装请求时剥离） */
   usageMetadata?: UsageMetadata;
   /** 本轮响应耗时（毫秒），存储用 */
@@ -131,6 +161,10 @@ export function isFunctionCallPart(part: Part): part is FunctionCallPart {
 
 export function isFunctionResponsePart(part: Part): part is FunctionResponsePart {
   return 'functionResponse' in part;
+}
+
+export function isProviderContextPart(part: Part): part is ProviderContextPart {
+  return 'providerContext' in part;
 }
 
 /** 从 Parts 数组中提取所有文本并拼接 */

@@ -7,46 +7,60 @@
  */
 
 import {
-  LLMRequest, LLMResponse, LLMStreamChunk, Part, FunctionCallPart,
-  isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart,
+  LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, ProviderContextItem,
+  isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart, isProviderContextPart,
 } from '../../types.js';
 import { isDocumentMimeType } from '../vision.js';
-import { FormatAdapter, StreamDecodeState } from './types.js';
+import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
 import { mapOpenAIResponsesThinkingLevel } from './thinking-level.js';
 
-export class OpenAIResponsesFormat implements FormatAdapter {
+export class OpenAIResponsesFormat implements CompactFormatAdapter {
   constructor(private model: string) {}
 
   // ============ 编码请求：Gemini (Internal) → OpenAI Responses ============
 
-  encodeRequest(request: LLMRequest, stream?: boolean): unknown {
-    const body: Record<string, any> = {
-      model: this.model,
-      store: false,
-      include: ['reasoning.encrypted_content'],
-    };
+  private encodeInstructions(request: LLMRequest): string | undefined {
+    if (!request.systemInstruction?.parts) return undefined;
+    const instructions = request.systemInstruction.parts
+      .filter(isVisibleTextPart)
+      .map(p => p.text)
+      .filter(Boolean)
+      .join('\n');
+    return instructions || undefined;
+  }
 
-    // 1. systemInstruction -> instructions
-    if (request.systemInstruction?.parts) {
-      body.instructions = request.systemInstruction.parts
-        .filter(isVisibleTextPart)
-        .map(p => p.text)
-        .join('\n');
-    }
-
-    // 2. contents -> input
+  private encodeInputItems(request: Pick<LLMRequest, 'contents'>): any[] {
     const inputItems: any[] = [];
     const pendingToolCallIds: string[] = [];
     let generatedToolCallIdCounter = 0;
 
     for (const content of request.contents) {
+      const rawContentItem = getOpenAIResponsesRawItem(content.providerContext);
+      if (rawContentItem) {
+        inputItems.push(rawContentItem);
+        continue;
+      }
+
       if (content.role === 'model') {
         let currentMessageItem: any = null;
 
         for (const part of content.parts) {
-          if (isTextPart(part) && part.thought === true) {
+          if (isProviderContextPart(part)) {
+            const rawItem = getOpenAIResponsesRawItem(part.providerContext);
+            if (rawItem) {
+              inputItems.push(rawItem);
+              currentMessageItem = null;
+            }
+          } else if (isTextPart(part) && part.thought === true) {
+            const rawItem = getOpenAIResponsesRawItem((part as any).providerContext);
+            if (rawItem) {
+              inputItems.push(rawItem);
+              currentMessageItem = null;
+              continue;
+            }
+
             const reasoningItem: any = {
               type: 'reasoning',
               summary: part.text ? [{ type: 'summary_text', text: part.text }] : [],
@@ -75,6 +89,15 @@ export class OpenAIResponsesFormat implements FormatAdapter {
           }
         }
       } else {
+        const rawParts = content.parts
+          .filter(isProviderContextPart)
+          .map(part => getOpenAIResponsesRawItem(part.providerContext))
+          .filter((item): item is any => !!item);
+        if (rawParts.length > 0) {
+          inputItems.push(...rawParts);
+          continue;
+        }
+
         const funcRespParts = content.parts.filter(isFunctionResponsePart);
         if (funcRespParts.length > 0) {
           for (let i = 0; i < funcRespParts.length; i++) {
@@ -123,9 +146,21 @@ export class OpenAIResponsesFormat implements FormatAdapter {
       }
     }
 
-    body.input = inputItems;
+    return inputItems;
+  }
 
-    // 3. tools
+  encodeRequest(request: LLMRequest, stream?: boolean): unknown {
+    const body: Record<string, any> = {
+      model: this.model,
+      store: false,
+      include: ['reasoning.encrypted_content'],
+    };
+
+    const instructions = this.encodeInstructions(request);
+    if (instructions) body.instructions = instructions;
+
+    body.input = this.encodeInputItems(request);
+
     if (request.tools && request.tools.length > 0) {
       body.tools = request.tools.flatMap(t => Array.isArray((t as any).functionDeclarations) ? (t as any).functionDeclarations : []).map(decl => ({
         type: 'function',
@@ -135,7 +170,6 @@ export class OpenAIResponsesFormat implements FormatAdapter {
       }));
     }
 
-    // 4. generationConfig
     if (request.generationConfig) {
       const gc = request.generationConfig;
       if (gc.maxOutputTokens !== undefined) body.max_output_tokens = gc.maxOutputTokens;
@@ -155,6 +189,49 @@ export class OpenAIResponsesFormat implements FormatAdapter {
 
     return body;
   }
+
+  encodeCompactRequest(request: LLMRequest): unknown {
+    const body: Record<string, any> = {
+      model: this.model,
+      input: this.encodeInputItems(request),
+    };
+
+    const instructions = this.encodeInstructions(request);
+    if (instructions) body.instructions = instructions;
+
+    return body;
+  }
+
+  decodeCompactResponse(raw: unknown): LLMCompactResponse {
+    const data = raw as any;
+    if (!Array.isArray(data.output)) {
+      throw new Error(`OpenAI Responses Compact API 未返回有效 output: ${JSON.stringify(data)}`);
+    }
+
+    return {
+      id: typeof data.id === 'string' ? data.id : undefined,
+      object: typeof data.object === 'string' ? data.object : undefined,
+      createdAt: typeof data.created_at === 'number' ? data.created_at : undefined,
+      contents: decodeOpenAIResponsesItemsToContents(data.output, 'responses.compact'),
+      usageMetadata: mapOpenAIResponsesUsage(data.usage),
+      rawResponse: data,
+    };
+  }
+
+  encodeCompactResponse(response: LLMCompactResponse): unknown {
+    if (response.rawResponse && typeof response.rawResponse === 'object' && !Array.isArray(response.rawResponse)) {
+      return response.rawResponse;
+    }
+
+    return {
+      ...(response.id ? { id: response.id } : {}),
+      object: response.object ?? 'response.compaction',
+      ...(response.createdAt !== undefined ? { created_at: response.createdAt } : {}),
+      output: this.encodeInputItems({ contents: response.contents }),
+      usage: mapUsageToOpenAIResponsesWire(response.usageMetadata),
+    };
+  }
+
 
   // ============ 解码响应：OpenAI Responses → Gemini (Internal) ============
 
@@ -177,6 +254,8 @@ export class OpenAIResponsesFormat implements FormatAdapter {
         }
       } else if (item.type === 'function_call') {
         parts.push(createFunctionCallPart(item));
+      } else if (item.type === 'compaction') {
+        parts.push(createProviderContextPart(item, 'responses'));
       }
     }
 
@@ -184,19 +263,7 @@ export class OpenAIResponsesFormat implements FormatAdapter {
 
     return {
       content: { role: 'model', parts },
-      usageMetadata: data.usage
-        ? (() => {
-            const cached = data.usage.input_tokens_details?.cached_tokens ?? 0;
-            const reasoningTokens = data.usage.output_tokens_details?.reasoning_tokens;
-            return {
-              promptTokenCount: data.usage.input_tokens,
-              ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
-              ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
-              candidatesTokenCount: data.usage.output_tokens,
-              totalTokenCount: data.usage.total_tokens,
-            };
-          })()
-        : undefined,
+      usageMetadata: mapOpenAIResponsesUsage(data.usage),
     };
   }
 
@@ -253,21 +320,12 @@ export class OpenAIResponsesFormat implements FormatAdapter {
       } else if (item?.type === 'function_call') {
         rememberPendingFunctionCall(streamState, item);
         emitFunctionCallChunk(chunk, item, streamState);
+      } else if (item?.type === 'compaction') {
+        appendPartDelta(chunk, createProviderContextPart(item, 'responses'));
       }
     } else if (event === 'response.completed') {
       const usage = data.usage ?? data.response?.usage;
-      if (usage) {
-        const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
-        chunk.usageMetadata = {
-          promptTokenCount: usage.input_tokens,
-          ...((usage.input_tokens_details?.cached_tokens ?? 0) > 0
-            ? { cachedContentTokenCount: usage.input_tokens_details.cached_tokens }
-            : {}),
-          ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
-          candidatesTokenCount: usage.output_tokens,
-          totalTokenCount: usage.total_tokens,
-        };
-      }
+      if (usage) chunk.usageMetadata = mapOpenAIResponsesUsage(usage);
       for (const item of data.response?.output ?? data.output ?? []) {
         if (item?.type === 'reasoning') {
           // 部分网关不会发送 reasoning_* delta，只在 completed.response.output
@@ -278,6 +336,8 @@ export class OpenAIResponsesFormat implements FormatAdapter {
           // 与 output_item.done 阶段的 reasoning 签名重复且常出现在可见正文之后，
           // 会在历史里形成额外的 signature-only thought part。保持原逻辑：
           // 只在 output_item.done 阶段接收 reasoning.encrypted_content。
+        } else if (item?.type === 'compaction') {
+          appendPartDelta(chunk, createProviderContextPart(item, 'responses'));
         }
       }
       flushPendingFunctionCalls(chunk, streamState);
@@ -309,6 +369,195 @@ interface PendingOpenAIResponsesFunctionCall {
   argumentsText: string;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneRawItem<T>(value: T): T {
+  if (value === undefined || value === null) return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
+function parseJSONValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (isPlainObject(value)) return value;
+  if (Array.isArray(value)) return { items: value };
+  if (typeof value === 'string') return { content: value };
+  if (value === undefined) return {};
+  return { value };
+}
+
+function parseDataUrl(value: unknown): { mimeType: string; data: string } | undefined {
+  if (typeof value !== 'string') return undefined;
+  const matched = /^data:([^;,]+);base64,(.*)$/s.exec(value);
+  if (!matched) return undefined;
+  return {
+    mimeType: matched[1],
+    data: matched[2],
+  };
+}
+
+function createOpenAIResponsesProviderContext(item: any, endpoint: string): ProviderContextItem {
+  return {
+    provider: 'openai',
+    format: 'openai-responses',
+    endpoint,
+    itemType: typeof item?.type === 'string' ? item.type : 'unknown',
+    id: typeof item?.id === 'string' ? item.id : undefined,
+    encryptedContent: typeof item?.encrypted_content === 'string' ? item.encrypted_content : undefined,
+    rawItem: cloneRawItem(item),
+  };
+}
+
+function createProviderContextPart(item: any, endpoint: string): Part {
+  return {
+    providerContext: createOpenAIResponsesProviderContext(item, endpoint),
+  };
+}
+
+function getOpenAIResponsesRawItem(context: ProviderContextItem | undefined): any | undefined {
+  if (!context || context.format !== 'openai-responses') return undefined;
+  if (!context.rawItem || typeof context.rawItem !== 'object' || Array.isArray(context.rawItem)) return undefined;
+  return cloneRawItem(context.rawItem);
+}
+
+function mapOpenAIResponsesUsage(usage: any): LLMResponse['usageMetadata'] | undefined {
+  if (!usage || typeof usage !== 'object') return undefined;
+  const cached = usage.input_tokens_details?.cached_tokens ?? 0;
+  const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
+  return {
+    promptTokenCount: usage.input_tokens,
+    ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
+    ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
+    candidatesTokenCount: usage.output_tokens,
+    totalTokenCount: usage.total_tokens,
+  };
+}
+
+function mapUsageToOpenAIResponsesWire(usage: LLMCompactResponse['usageMetadata']): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  return {
+    input_tokens: usage.promptTokenCount ?? 0,
+    input_tokens_details: {
+      cached_tokens: usage.cachedContentTokenCount ?? 0,
+    },
+    output_tokens: usage.candidatesTokenCount ?? 0,
+    ...(usage.thoughtsTokenCount !== undefined ? {
+      output_tokens_details: {
+        reasoning_tokens: usage.thoughtsTokenCount,
+      },
+    } : {}),
+    total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
+  };
+}
+
+function parseOpenAIResponsesContentBlocks(content: unknown): Part[] {
+  if (typeof content === 'string') return content ? [{ text: content }] : [];
+  if (!Array.isArray(content)) return [];
+
+  const parts: Part[] = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      if (block) parts.push({ text: block });
+      continue;
+    }
+    if (!block || typeof block !== 'object') continue;
+    const item = block as any;
+    if ((item.type === 'input_text' || item.type === 'output_text' || item.type === 'text') && typeof item.text === 'string') {
+      parts.push({ text: item.text });
+    } else if (item.type === 'input_image') {
+      const inlineData = parseDataUrl(item.image_url);
+      if (inlineData) parts.push({ inlineData });
+    } else if (item.type === 'input_file') {
+      const inlineData = parseDataUrl(item.file_data);
+      if (inlineData) parts.push({ inlineData });
+    }
+  }
+  return parts;
+}
+
+function mapOpenAIResponsesRole(role: unknown): Content['role'] {
+  return role === 'assistant' ? 'model' : 'user';
+}
+
+function decodeOpenAIResponsesItemsToContents(items: unknown[], endpoint: string): Content[] {
+  const contents: Content[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  for (const rawItem of items) {
+    if (!rawItem || typeof rawItem !== 'object') continue;
+    const item = rawItem as any;
+    const providerContext = createOpenAIResponsesProviderContext(item, endpoint);
+
+    if (item.type === 'message') {
+      const parts = parseOpenAIResponsesContentBlocks(item.content);
+      contents.push({
+        role: mapOpenAIResponsesRole(item.role),
+        parts: parts.length > 0 ? parts : [createProviderContextPart(item, endpoint)],
+        providerContext,
+      });
+      continue;
+    }
+
+    if (item.type === 'reasoning') {
+      const part = createReasoningPart(item, { includeText: true, includeSignature: true });
+      contents.push({
+        role: 'model',
+        parts: part ? [part] : [createProviderContextPart(item, endpoint)],
+        providerContext,
+      });
+      continue;
+    }
+
+    if (item.type === 'function_call') {
+      const callId = normalizeCallId(item.call_id) ?? normalizeCallId(item.id);
+      if (callId && typeof item.name === 'string') toolNameByCallId.set(callId, item.name);
+      contents.push({
+        role: 'model',
+        parts: [createFunctionCallPart(item)],
+        providerContext,
+      });
+      continue;
+    }
+
+    if (item.type === 'function_call_output') {
+      const callId = normalizeCallId(item.call_id);
+      contents.push({
+        role: 'user',
+        parts: [{
+          functionResponse: {
+            name: (callId && toolNameByCallId.get(callId)) || String(item.name ?? 'unknown_tool'),
+            response: toRecord(parseJSONValue(item.output)),
+            callId,
+          },
+        }],
+        providerContext,
+      });
+      continue;
+    }
+
+    contents.push({
+      role: 'model',
+      parts: [createProviderContextPart(item, endpoint)],
+      providerContext,
+    });
+  }
+
+  return contents;
+}
+
 function createReasoningPart(
   item: any,
   options: { includeText: boolean; includeSignature: boolean },
@@ -326,6 +575,8 @@ function createReasoningPart(
 
   return part.text || part.thoughtSignatures ? part : undefined;
 }
+
+
 
 function extractReasoningSummaryText(summary: unknown): string {
   if (typeof summary === 'string') return summary;

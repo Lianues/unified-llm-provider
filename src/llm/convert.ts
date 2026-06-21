@@ -1,10 +1,11 @@
-import type { LLMRequest, LLMResponse, LLMStreamChunk, Content, Part, FunctionDeclaration } from '../types/index.js';
-import { isTextPart } from '../types/index.js';
+import type { LLMCompactResponse, LLMRequest, LLMResponse, LLMStreamChunk, Content, Part, FunctionDeclaration, ProviderContextItem } from '../types/index.js';
+import { isProviderContextPart, isTextPart } from '../types/index.js';
 import { normalizeCallId } from './formats/tool-call-ids.js';
 import { normalizeLLMRequestThoughtSignatures, normalizeLLMResponseThoughtSignatures, normalizeLLMStreamChunkThoughtSignatures, detectLLMRequestSignatureRepresentation } from '../signatures/normalize.js';
 import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignatures, serializeLLMStreamChunkThoughtSignatures } from '../signatures/serialize.js';
 import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
 import { normalizeThinkingLevel } from './formats/thinking-level.js';
+import { isCompactFormatAdapter } from './formats/types.js';
 
 export type UnifiedFormatId = 'unified';
 export type WireFormatId = 'gemini' | 'claude' | 'openai-compatible' | 'openai-responses' | 'deepseek';
@@ -93,6 +94,33 @@ function parseDataUrl(value: unknown): { mimeType: string; data: string } | unde
   return {
     mimeType: matched[1],
     data: matched[2],
+  };
+}
+
+function cloneRawItem<T>(value: T): T {
+  if (value === undefined || value === null) return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
+function createOpenAIResponsesProviderContext(item: any, endpoint = 'responses'): ProviderContextItem {
+  return {
+    provider: 'openai',
+    format: 'openai-responses',
+    endpoint,
+    itemType: typeof item?.type === 'string' ? item.type : 'unknown',
+    id: typeof item?.id === 'string' ? item.id : undefined,
+    encryptedContent: typeof item?.encrypted_content === 'string' ? item.encrypted_content : undefined,
+    rawItem: cloneRawItem(item),
+  };
+}
+
+function createOpenAIResponsesProviderContextPart(item: any, endpoint = 'responses'): Part {
+  return {
+    providerContext: createOpenAIResponsesProviderContext(item, endpoint),
   };
 }
 
@@ -470,6 +498,17 @@ function decodeOpenAIResponsesRequest(raw: unknown): LLMRequest {
       continue;
     }
 
+    if (item.type === 'compaction') {
+      flushModel();
+      flushUser();
+      contents.push({
+        role: 'model',
+        parts: [createOpenAIResponsesProviderContextPart(item, 'responses')],
+        providerContext: createOpenAIResponsesProviderContext(item, 'responses'),
+      });
+      continue;
+    }
+
     if (item.role === 'user') {
       flushModel();
       pendingUserParts.push(...parseOpenAIResponsesUserBlocks(item.content));
@@ -837,6 +876,62 @@ export function encodeResponseToFormat(response: LLMResponse, options: EncodeRes
   }
 }
 
+export interface DecodeCompactResponseFromFormatOptions extends FormatTransformOptions {
+  format: FormatId;
+  registry?: Pick<FormatRegistry, 'get'>;
+}
+
+export function decodeCompactResponseFromFormat(raw: unknown, options: DecodeCompactResponseFromFormatOptions): LLMCompactResponse {
+  const format = normalizeFormatId(options.format);
+  if (format === 'unified') return raw as LLMCompactResponse;
+
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  if (!isCompactFormatAdapter(adapter)) {
+    throw new Error(`格式 ${format} 不支持 compact 响应解码`);
+  }
+  return adapter.decodeCompactResponse(raw);
+}
+
+export interface EncodeCompactResponseToFormatOptions extends FormatTransformOptions {
+  format: FormatId;
+  sourceFormat?: FormatId;
+}
+
+export function encodeCompactResponseToFormat(response: LLMCompactResponse, options: EncodeCompactResponseToFormatOptions): unknown {
+  const format = normalizeFormatId(options.format);
+  if (format === 'unified') return response;
+
+  const registry = resolveFormatRegistry(options.registry);
+  const adapter = createAdapter(format, registry, options);
+  if (!isCompactFormatAdapter(adapter) || typeof adapter.encodeCompactResponse !== 'function') {
+    throw new Error(`格式 ${format} 不支持 compact 响应编码`);
+  }
+  return adapter.encodeCompactResponse(response);
+}
+
+export interface ConvertCompactResponseOptions extends FormatTransformOptions {
+  from: FormatId;
+  to: FormatId;
+}
+
+export function convertCompactResponse(raw: unknown, options: ConvertCompactResponseOptions): unknown {
+  const compact = decodeCompactResponseFromFormat(raw, {
+    format: options.from,
+    registry: options.registry,
+    model: options.model,
+    signatureMode: options.signatureMode,
+  });
+  return encodeCompactResponseToFormat(compact, {
+    format: options.to,
+    sourceFormat: options.from,
+    registry: options.registry,
+    model: options.model,
+    signatureMode: options.signatureMode,
+  });
+}
+
+
 export interface ConvertRequestOptions extends FormatTransformOptions {
   from: FormatId;
   to: FormatId;
@@ -1043,6 +1138,15 @@ function createOpenAIResponsesStreamPayloads(chunk: LLMStreamChunk): unknown[] {
           name: part.functionCall.name,
           arguments: JSON.stringify(part.functionCall.args ?? {}),
         },
+      });
+    } else if (isProviderContextPart(part)
+      && part.providerContext.format === 'openai-responses'
+      && part.providerContext.rawItem
+      && typeof part.providerContext.rawItem === 'object'
+      && !Array.isArray(part.providerContext.rawItem)) {
+      payloads.push({
+        event: 'response.output_item.done',
+        item: cloneRawItem(part.providerContext.rawItem),
       });
     }
 

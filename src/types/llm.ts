@@ -62,6 +62,22 @@ export interface LLMResponse {
   usageMetadata?: UsageMetadata;
 }
 
+/** 压缩端点返回的统一结果。contents 是压缩后的下一轮上下文窗口。 */
+export interface LLMCompactResponse {
+  /** provider compact response id，例如 resp_... */
+  id?: string;
+  /** provider 原始 object，例如 response.compaction */
+  object?: string;
+  /** 创建时间。OpenAI Responses 为秒级 Unix timestamp。 */
+  createdAt?: number;
+  /** compact 后的上下文窗口，可由客户端继续维护并传回本包调用。 */
+  contents: Content[];
+  /** 压缩过程 token 用量 */
+  usageMetadata?: UsageMetadata;
+  /** 原始 provider 响应，调试或完全保真时可用。 */
+  rawResponse?: unknown;
+}
+
 /** 流式响应的单个数据块 */
 export interface LLMStreamChunk {
   /** 本块新增的有序 parts（优先使用） */
