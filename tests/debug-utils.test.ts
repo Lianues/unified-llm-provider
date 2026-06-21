@@ -35,6 +35,29 @@ describe('debug utils', () => {
     expect(curl).toContain('***');
   });
 
+  it('formatRequestAsCurl pretty body 保留真实换行，不输出字面量 \\n', () => {
+    const curl = formatRequestAsCurl(
+      'https://example.com',
+      { 'content-type': 'application/json' },
+      { model: 'test', messages: [{ role: 'user', content: 'hello' }] },
+    );
+
+    expect(curl).toContain("-d '{\n");
+    expect(curl).not.toContain("-d '{\\n");
+  });
+
+  it('formatRequestAsCurl compact body 不应把 JSON 对象二次 stringify 成字符串', () => {
+    const curl = formatRequestAsCurl(
+      'https://example.com',
+      { 'content-type': 'application/json' },
+      { model: 'test' },
+      { prettyBody: false },
+    );
+
+    expect(curl).toContain(`-d '{"model":"test"}'`);
+    expect(curl).not.toContain(`-d '"{`);
+  });
+
   it('bodyToCurlPayload 可美化 body 输出', () => {
     const body = bodyToCurlPayload({ model: 'test', messages: [{ role: 'user' }] });
     expect(body).toContain('"model"');

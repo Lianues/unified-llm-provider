@@ -41,14 +41,18 @@ export interface DebugTraceStore {
   streamChunks?: string[];
 }
 
-export function bodyToCurlPayload(body: unknown): string {
+export function bodyToCurlPayload(body: unknown, pretty = true): string {
   if (body === null || body === undefined) return '';
-  return JSON.stringify(body, null, 2);
+  return JSON.stringify(body, null, pretty ? 2 : undefined) ?? '';
+}
+
+function quoteShellSingle(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 export function headersToCurlFlags(headers: Record<string, string>): string {
   return Object.entries(headers)
-    .map(([key, value]) => `-H '${key}: ${value}'`)
+    .map(([key, value]) => `-H ${quoteShellSingle(`${key}: ${value}`)}`)
     .join(' \\\n  ');
 }
 
@@ -67,19 +71,14 @@ export function formatRequestAsCurl(
 ): string {
   const includeApiKey = options?.includeApiKey !== false;
   const prettyBody = options?.prettyBody !== false;
-  const bodyStr = body ? bodyToCurlPayload(body) : '';
+  const bodyStr = body === null || body === undefined ? '' : bodyToCurlPayload(body, prettyBody);
   const headersToInclude = includeApiKey ? headers : maskApiKeyHeaders(headers);
   const headerFlags = headersToCurlFlags(headersToInclude);
-  const bodyFlag = bodyStr ? `-d '${escapeForCurl(bodyStr, prettyBody)}'` : '-d ' + "''";
-  const lines: string[] = [`curl -X POST '${url}'`];
+  const bodyFlag = bodyStr ? `-d ${quoteShellSingle(bodyStr)}` : "-d ''";
+  const lines: string[] = [`curl -X POST ${quoteShellSingle(url)}`];
   if (headerFlags) lines.push(`  ${headerFlags}`);
   lines.push(`  ${bodyFlag}`);
   return lines.join(' \\\n');
-}
-
-function escapeForCurl(body: string, pretty: boolean): string {
-  if (pretty) return body.replace(/\n/g, '\\n').replace(/'/g, "'\\''");
-  return JSON.stringify(body).replace(/'/g, "'\\''");
 }
 
 function maskApiKeyHeaders(headers: Record<string, string>): Record<string, string> {
