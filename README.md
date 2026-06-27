@@ -352,6 +352,82 @@ openai-compatible request
 
 签名也跟着这条链一起走，不用你单独声明“签名转成什么格式”。
 
+### 上游错误原生透传
+
+provider 调用不会把各家上游错误强行转换成统一错误码；错误会尽量以**原始响应体 / 原始流式块**交给你，由前端或业务层自行展示和处理。
+
+会透传的常见情况包括：
+
+- HTTP 直接返回 `4xx / 5xx`；
+- HTTP `200 OK`，但非流式响应体里包含上游原生 `error` 结构；
+- HTTP `200 OK`，但 SSE / stream chunk 里包含错误事件或错误块；
+- 流式过程中返回非 JSON 的错误文本；
+- 流式连接读取中断。
+
+#### 非流式：`response.error`
+
+当 `outputFormat: 'unified'` 时，非流式错误会返回一个带 `error` 的响应对象：
+
+```ts
+const response = await provider.chat(request, {
+  inputFormat: 'unified',
+  outputFormat: 'unified',
+});
+
+if (response.error) {
+  // HTTP 状态 / 头 / 原始响应体都保留在这里
+  console.log(response.error.status);
+  console.log(response.error.headers);
+  console.log(response.error.bodyText); // 原始文本
+  console.log(response.error.rawBody);  // 如果是 JSON，会是解析后的原始对象
+  console.log(response.rawResponse);    // 便捷原始响应体
+}
+```
+
+错误响应仍然保留一个空的 `content` 占位，方便下游类型稳定：
+
+```ts
+{
+  content: { role: 'model', parts: [{ text: '' }] },
+  error: {
+    kind: 'http_error',
+    status: 429,
+    bodyText: '{"error":{"message":"rate limited"}}',
+    rawBody: { error: { message: 'rate limited' } },
+  },
+  rawResponse: { error: { message: 'rate limited' } },
+}
+```
+
+#### 流式：`chunk.error`
+
+流式错误不会被静默吞掉，会作为一个普通 chunk 产出：
+
+```ts
+for await (const chunk of provider.chatStream(request, {
+  inputFormat: 'unified',
+  outputFormat: 'unified',
+})) {
+  if (chunk.error) {
+    renderErrorBlock(chunk.error.rawChunk ?? chunk.error.rawBody ?? chunk.error.bodyText ?? chunk.error.data);
+    continue;
+  }
+
+  renderText(chunk.textDelta);
+}
+```
+
+`error.kind` 只标记错误来源，不代表统一错误码：
+
+- `http_error`：HTTP 非 2xx；
+- `response_error`：非流式 2xx 响应体中带原生错误；
+- `stream_error`：SSE / stream 中带原生错误事件或错误块；
+- `stream_parse_error`：SSE data 不是 JSON，原文保存在 `data/bodyText`；
+- `stream_read_error`：流读取中断；
+- `decode_error`：本包解析正常响应结构失败，原始响应 / chunk 会保留。
+
+如果 `outputFormat` 指向具体 provider 格式（例如 `openai-compatible` / `claude`），遇到错误时会优先**直接返回上游原始错误响应体或原始错误 chunk**，不再尝试编码成该 provider 的正常成功响应格式。
+
 ### Dry Run：只构建请求，不发送
 
 如果你只想展示或复制“这次真实会发给 provider 的 HTTP 请求”，可以使用 `provider.dryRun()`。
@@ -1086,6 +1162,7 @@ curl -X POST 'https://api.anthropic.com/v1/messages' \
 - thought signature 跟随格式自动处理
 - 调试钩子 `onRequest` / `onResponse` / `onStreamChunk`
 - 显式代理配置 `proxy`
+- 上游错误原生透传（HTTP 错误 / 流式错误 chunk / 非 JSON SSE 错误文本）
 - 模型列表拉取与 OpenAI / Claude / Gemini 格式转换
 
 已验证通过：

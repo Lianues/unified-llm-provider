@@ -118,6 +118,81 @@ function createOpenAIResponsesProviderContext(item: any, endpoint = 'responses')
   };
 }
 
+function firstDefined(...values: unknown[]): unknown {
+  return values.find(value => value !== undefined);
+}
+
+function getRawErrorPassthroughPayload(value: {
+  error?: { rawChunk?: unknown; rawBody?: unknown; bodyText?: string; data?: string };
+  rawResponse?: unknown;
+  rawChunk?: unknown;
+}): unknown {
+  return firstDefined(value.rawResponse, value.rawChunk, value.error?.rawChunk, value.error?.rawBody, value.error?.bodyText, value.error?.data, { error: value.error });
+}
+
+function hasRawErrorLikeEvent(event: unknown): boolean {
+  if (typeof event !== 'string') return false;
+  const normalized = event.toLowerCase();
+  return normalized.includes('error')
+    || normalized.includes('failed')
+    || normalized.includes('incomplete');
+}
+
+function hasRawErrorLikeType(type: unknown): boolean {
+  if (typeof type !== 'string') return false;
+  const normalized = type.toLowerCase();
+  return normalized === 'error'
+    || normalized.endsWith('_error')
+    || normalized.includes('error')
+    || normalized.includes('failed')
+    || normalized.includes('incomplete');
+}
+
+function hasRawErrorLikeStatus(status: unknown): boolean {
+  if (typeof status !== 'string') return false;
+  const normalized = status.toLowerCase();
+  return normalized === 'error'
+    || normalized === 'failed'
+    || normalized === 'incomplete'
+    || normalized === 'cancelled';
+}
+
+function hasNonNullRawErrorField(raw: Record<string, unknown>): boolean {
+  return 'error' in raw && raw.error !== null && raw.error !== undefined;
+}
+
+function isRawProviderErrorPayload(raw: unknown): boolean {
+  if (!isPlainObject(raw)) return false;
+  if (hasNonNullRawErrorField(raw)) return true;
+  if (hasRawErrorLikeEvent(raw.event)) return true;
+  if (hasRawErrorLikeType(raw.type)) return true;
+  if (hasRawErrorLikeStatus(raw.status) && ('message' in raw || 'last_error' in raw || 'incomplete_details' in raw || hasNonNullRawErrorField(raw))) return true;
+
+  const response = raw.response;
+  if (isPlainObject(response)) {
+    if (hasNonNullRawErrorField(response)) return true;
+    if (hasRawErrorLikeStatus(response.status) && ('message' in response || 'last_error' in response || 'incomplete_details' in response || hasNonNullRawErrorField(response))) return true;
+  }
+
+  return false;
+}
+
+function rawErrorResponse(raw: unknown): LLMResponse {
+  return {
+    content: { role: 'model', parts: [{ text: '' }] },
+    error: { kind: 'response_error', rawBody: raw },
+    rawResponse: raw,
+  };
+}
+
+function rawErrorStreamChunk(raw: unknown): LLMStreamChunk {
+  const event = isPlainObject(raw) && typeof raw.event === 'string' ? raw.event : undefined;
+  return {
+    error: { kind: 'stream_error', event, rawChunk: raw },
+    rawChunk: raw,
+  };
+}
+
 function createOpenAIResponsesProviderContextPart(item: any, endpoint = 'responses'): Part {
   return {
     providerContext: createOpenAIResponsesProviderContext(item, endpoint),
@@ -784,6 +859,7 @@ export interface DecodeResponseFromFormatOptions extends FormatFactoryOptions {
 export function decodeResponseFromFormat(raw: unknown, options: DecodeResponseFromFormatOptions): LLMResponse {
   const format = normalizeFormatId(options.format);
   if (format === 'unified') {
+    if (isRawProviderErrorPayload(raw)) return rawErrorResponse(raw);
     return normalizeLLMResponseThoughtSignatures(raw as LLMResponse, {
       formatHint: getSignatureProviderForFormat('unified'),
     });
@@ -791,6 +867,7 @@ export function decodeResponseFromFormat(raw: unknown, options: DecodeResponseFr
 
   const registry = resolveFormatRegistry(options.registry);
   const adapter = createAdapter(format, registry, options);
+  if (isRawProviderErrorPayload(raw)) return rawErrorResponse(raw);
   const normalized = normalizeLLMResponseThoughtSignatures(adapter.decodeResponse(raw), {
     formatHint: getSignatureProviderForFormat(format),
   });
@@ -810,6 +887,11 @@ export interface EncodeResponseToFormatOptions extends FormatTransformOptions {
 
 export function encodeResponseToFormat(response: LLMResponse, options: EncodeResponseToFormatOptions): unknown {
   const format = normalizeFormatId(options.format);
+  if (response.error) {
+    if (format === 'unified') return response;
+    return getRawErrorPassthroughPayload(response);
+  }
+
   const sourceFormat = options.sourceFormat ? normalizeFormatId(options.sourceFormat) : 'unified';
   const normalizedResponse = normalizeLLMResponseThoughtSignatures(response, {
     formatHint: getSignatureProviderForFormat(sourceFormat),
@@ -1185,6 +1267,11 @@ export interface EncodeStreamChunkToFormatOptions extends FormatTransformOptions
 
 export function encodeStreamChunkToFormat(chunk: LLMStreamChunk, options: EncodeStreamChunkToFormatOptions): unknown {
   const format = normalizeFormatId(options.format);
+  if (chunk.error) {
+    if (format === 'unified') return chunk;
+    return getRawErrorPassthroughPayload(chunk);
+  }
+
   const sourceFormat = options.sourceFormat ? normalizeFormatId(options.sourceFormat) : 'unified';
   const normalizedChunk = normalizeLLMStreamChunkThoughtSignatures(chunk, {
     formatHint: getSignatureProviderForFormat(sourceFormat),
@@ -1224,6 +1311,7 @@ export function createStreamChunkDecoder(options: DecodeStreamChunkFromFormatOpt
   if (format === 'unified') {
     return {
       decode(raw: unknown): LLMStreamChunk {
+        if (isRawProviderErrorPayload(raw)) return rawErrorStreamChunk(raw);
         return normalizeLLMStreamChunkThoughtSignatures(raw as LLMStreamChunk, {
           formatHint: getSignatureProviderForFormat('unified'),
         });
@@ -1237,6 +1325,7 @@ export function createStreamChunkDecoder(options: DecodeStreamChunkFromFormatOpt
 
   return {
     decode(raw: unknown): LLMStreamChunk {
+      if (isRawProviderErrorPayload(raw)) return rawErrorStreamChunk(raw);
       const normalized = normalizeLLMStreamChunkThoughtSignatures(adapter.decodeStreamChunk(raw, state), {
         formatHint: getSignatureProviderForFormat(format),
       });

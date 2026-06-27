@@ -52,6 +52,41 @@ export interface LLMRequest {
   generationConfig?: LLMGenerationConfig;
 }
 
+/**
+ * 上游原生错误透传信息。
+ *
+ * 设计目标：只标记“这是错误”，并尽量保留 HTTP 响应体 / SSE 原始块，
+ * 不把各家 provider 的错误结构强行转换成统一错误码。
+ */
+export interface LLMRawErrorInfo {
+  /** 错误来源类型，便于前端决定展示样式。 */
+  kind:
+    | 'http_error'
+    | 'response_error'
+    | 'stream_error'
+    | 'stream_parse_error'
+    | 'stream_read_error'
+    | 'decode_error';
+  /** HTTP 状态码。仅 HTTP 层可用。 */
+  status?: number;
+  /** HTTP 状态文本。 */
+  statusText?: string;
+  /** HTTP 响应头，转为普通对象后透传。 */
+  headers?: Record<string, string>;
+  /** 完整响应体文本。HTTP 错误或非 JSON 响应时可用。 */
+  bodyText?: string;
+  /** 响应体 JSON 解析结果；解析失败时不设置，bodyText 仍保留原文。 */
+  rawBody?: unknown;
+  /** SSE 事件名，流式错误块里可用。 */
+  event?: string;
+  /** SSE data 原文。 */
+  data?: string;
+  /** SSE JSON 解析后的原始块。 */
+  rawChunk?: unknown;
+  /** 本库内部解析/读取失败时的错误文本；不替代 rawBody/rawChunk。 */
+  message?: string;
+}
+
 /** LLM 响应（统一格式） */
 export interface LLMResponse {
   /** 模型返回的消息内容 */
@@ -60,6 +95,10 @@ export interface LLMResponse {
   finishReason?: string;
   /** Token 用量统计 */
   usageMetadata?: UsageMetadata;
+  /** 上游报错时原生透传的错误信息；正常响应不设置。 */
+  error?: LLMRawErrorInfo;
+  /** 上游原始响应体；成功路径通常不设置，错误路径尽量保留。 */
+  rawResponse?: unknown;
 }
 
 /** 压缩端点返回的统一结果。contents 是压缩后的下一轮上下文窗口。 */
@@ -100,4 +139,8 @@ export interface LLMStreamChunk {
     'openai-responses'?: string;
     [key: string]: string | undefined;
   };
+  /** 上游报错时原生透传的错误信息；正常 chunk 不设置。 */
+  error?: LLMRawErrorInfo;
+  /** 上游原始 SSE 块；错误 chunk 会尽量保留。 */
+  rawChunk?: unknown;
 }

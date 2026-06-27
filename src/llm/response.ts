@@ -5,8 +5,109 @@
  * 内部使用 FormatAdapter 做格式解码，内置 SSE 解析处理流式数据。
  */
 
-import { LLMResponse, LLMStreamChunk } from '../types.js';
-import { FormatAdapter } from './formats/types.js';
+import type { LLMRawErrorInfo, LLMResponse, LLMStreamChunk } from '../types.js';
+import type { FormatAdapter } from './formats/types.js';
+
+// ============ 通用错误透传 ============
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+  return result;
+}
+
+function stringifyError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  if (!text.trim()) return { ok: false };
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function readResponseBody(res: Response): Promise<{ bodyText: string; rawBody?: unknown }> {
+  const bodyText = await res.text();
+  const parsed = tryParseJson(bodyText);
+  return parsed.ok ? { bodyText, rawBody: parsed.value } : { bodyText };
+}
+
+function createErrorResponse(error: LLMRawErrorInfo): LLMResponse {
+  return {
+    content: { role: 'model', parts: [{ text: '' }] },
+    error,
+    rawResponse: error.rawBody ?? error.bodyText,
+  };
+}
+
+function createErrorStreamChunk(error: LLMRawErrorInfo): LLMStreamChunk {
+  return {
+    error,
+    rawChunk: error.rawChunk ?? error.rawBody ?? error.bodyText ?? error.data,
+  };
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function hasErrorLikeEvent(event: unknown): boolean {
+  if (typeof event !== 'string') return false;
+  const normalized = event.toLowerCase();
+  return normalized.includes('error')
+    || normalized.includes('failed')
+    || normalized.includes('incomplete');
+}
+
+function hasErrorLikeType(type: unknown): boolean {
+  if (typeof type !== 'string') return false;
+  const normalized = type.toLowerCase();
+  return normalized === 'error'
+    || normalized.endsWith('_error')
+    || normalized.includes('error')
+    || normalized.includes('failed')
+    || normalized.includes('incomplete');
+}
+
+function hasErrorLikeStatus(status: unknown): boolean {
+  if (typeof status !== 'string') return false;
+  const normalized = status.toLowerCase();
+  return normalized === 'error'
+    || normalized === 'failed'
+    || normalized === 'incomplete'
+    || normalized === 'cancelled';
+}
+
+function hasNonNullErrorField(payload: Record<string, unknown>): boolean {
+  return 'error' in payload && payload.error !== null && payload.error !== undefined;
+}
+
+function isProviderErrorPayload(payload: unknown, event?: string): boolean {
+  if (hasErrorLikeEvent(event)) return true;
+  if (!isPlainObject(payload)) return false;
+
+  if (hasNonNullErrorField(payload)) return true;
+  if (hasErrorLikeEvent(payload.event)) return true;
+  if (hasErrorLikeType(payload.type)) return true;
+  if (hasErrorLikeStatus(payload.status) && ('message' in payload || 'last_error' in payload || 'incomplete_details' in payload || hasNonNullErrorField(payload))) return true;
+
+  const response = payload.response;
+  if (isPlainObject(response)) {
+    if (hasNonNullErrorField(response)) return true;
+    if (hasErrorLikeStatus(response.status) && ('message' in response || 'last_error' in response || 'incomplete_details' in response || hasNonNullErrorField(response))) return true;
+  }
+
+  return false;
+}
 
 // ============ 非流式 ============
 
@@ -15,12 +116,45 @@ export async function processResponse(
   res: Response,
   format: FormatAdapter,
 ): Promise<LLMResponse> {
+  const headers = headersToRecord(res.headers);
+  const { bodyText, rawBody } = await readResponseBody(res);
+  const rawResponse = rawBody ?? bodyText;
+
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`LLM API 错误 (${res.status}): ${text}`);
+    return createErrorResponse({
+      kind: 'http_error',
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+      bodyText,
+      ...(rawBody !== undefined ? { rawBody } : {}),
+    });
   }
-  const data = await res.json();
-  return format.decodeResponse(data);
+
+  if (isProviderErrorPayload(rawResponse)) {
+    return createErrorResponse({
+      kind: 'response_error',
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+      bodyText,
+      rawBody: rawResponse,
+    });
+  }
+
+  try {
+    return format.decodeResponse(rawResponse);
+  } catch (err) {
+    return createErrorResponse({
+      kind: 'decode_error',
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+      bodyText,
+      rawBody: rawResponse,
+      message: stringifyError(err),
+    });
+  }
 }
 
 // ============ 流式 ============
@@ -30,16 +164,80 @@ export async function* processStreamResponse(
   res: Response,
   format: FormatAdapter,
 ): AsyncGenerator<LLMStreamChunk> {
+  const headers = headersToRecord(res.headers);
+
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`LLM API 流式错误 (${res.status}): ${text}`);
+    const { bodyText, rawBody } = await readResponseBody(res);
+    yield createErrorStreamChunk({
+      kind: 'http_error',
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+      bodyText,
+      ...(rawBody !== undefined ? { rawBody } : {}),
+    });
+    return;
   }
- const state = format.createStreamState();
-  for await (const sse of parseSSE(res)) {
-    const payload = JSON.parse(sse.data);
-    // 注入事件名，以便 FormatAdapter 区分
-    if (sse.event) (payload as any).event = sse.event;
-    yield format.decodeStreamChunk(payload, state);
+
+  const state = format.createStreamState();
+  try {
+    for await (const sse of parseSSE(res)) {
+      const parsed = tryParseJson(sse.data);
+      if (!parsed.ok) {
+        yield createErrorStreamChunk({
+          kind: 'stream_parse_error',
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+          event: sse.event,
+          data: sse.data,
+          bodyText: sse.data,
+          message: `SSE data 不是 JSON: ${sse.data}`,
+          rawChunk: sse.data,
+        });
+        continue;
+      }
+
+      const payload = isPlainObject(parsed.value)
+        ? { ...parsed.value, ...(sse.event ? { event: sse.event } : {}) }
+        : parsed.value;
+
+      if (isProviderErrorPayload(payload, sse.event)) {
+        yield createErrorStreamChunk({
+          kind: 'stream_error',
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+          event: sse.event ?? stringField(isPlainObject(payload) ? payload.event : undefined),
+          data: sse.data,
+          rawChunk: payload,
+        });
+        continue;
+      }
+
+      try {
+        yield format.decodeStreamChunk(payload, state);
+      } catch (err) {
+        yield createErrorStreamChunk({
+          kind: 'decode_error',
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+          event: sse.event,
+          data: sse.data,
+          rawChunk: payload,
+          message: stringifyError(err),
+        });
+      }
+    }
+  } catch (err) {
+    yield createErrorStreamChunk({
+      kind: 'stream_read_error',
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+      message: stringifyError(err),
+    });
   }
 }
 
