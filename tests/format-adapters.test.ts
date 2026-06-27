@@ -23,6 +23,23 @@ describe('format adapters', () => {
     expect(body.contents[0].parts[0].thoughtSignatures).toBeUndefined();
   });
 
+  it('GeminiFormat: 发送 inlineData 时会剥离本地文件名', () => {
+    const fmt = new GeminiFormat();
+    const request: LLMRequest = {
+      contents: [{
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=', name: 'paper.pdf' } }],
+      }],
+    };
+
+    const body = fmt.encodeRequest(request) as any;
+    expect(body.contents[0].parts[0].inlineData).toEqual({
+      mimeType: 'application/pdf',
+      data: 'JVBERi0=',
+    });
+  });
+
+
   it('ClaudeFormat: thinking block 的 signature 字段正确传递', () => {
     const fmt = new ClaudeFormat('claude-sonnet-4');
     const request: LLMRequest = {

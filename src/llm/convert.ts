@@ -6,6 +6,7 @@ import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignat
 import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
 import { normalizeThinkingLevel } from './formats/thinking-level.js';
 import { isCompactFormatAdapter } from './formats/types.js';
+import { parseBase64DataUrl } from './vision.js';
 
 export type UnifiedFormatId = 'unified';
 export type WireFormatId = 'gemini' | 'claude' | 'openai-compatible' | 'openai-responses' | 'deepseek';
@@ -87,16 +88,6 @@ function toRecord(value: unknown): Record<string, unknown> {
   return { value };
 }
 
-function parseDataUrl(value: unknown): { mimeType: string; data: string } | undefined {
-  if (typeof value !== 'string') return undefined;
-  const matched = /^data:([^;,]+);base64,(.*)$/s.exec(value);
-  if (!matched) return undefined;
-  return {
-    mimeType: matched[1],
-    data: matched[2],
-  };
-}
-
 function cloneRawItem<T>(value: T): T {
   if (value === undefined || value === null) return value;
   try {
@@ -105,6 +96,7 @@ function cloneRawItem<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
   }
 }
+
 
 function createOpenAIResponsesProviderContext(item: any, endpoint = 'responses'): ProviderContextItem {
   return {
@@ -199,6 +191,16 @@ function createOpenAIResponsesProviderContextPart(item: any, endpoint = 'respons
   };
 }
 
+function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBase64DataUrl>, name?: unknown): void {
+  if (!inlineData) return;
+  parts.push({
+    inlineData: {
+      ...inlineData,
+      ...(typeof name === 'string' && name ? { name } : {}),
+    },
+  });
+}
+
 function parseOpenAIContentBlocks(blocks: unknown): Part[] {
   if (!Array.isArray(blocks)) return [];
   const parts: Part[] = [];
@@ -212,8 +214,7 @@ function parseOpenAIContentBlocks(blocks: unknown): Part[] {
     if (item.type === 'text' && typeof item.text === 'string') {
       parts.push({ text: item.text });
     } else if (item.type === 'image_url') {
-      const inlineData = parseDataUrl(item.image_url?.url);
-      if (inlineData) parts.push({ inlineData });
+      addInlineDataPart(parts, parseBase64DataUrl(item.image_url?.url));
     }
   }
   return parts;
@@ -228,11 +229,9 @@ function parseOpenAIResponsesUserBlocks(blocks: unknown): Part[] {
     if ((item.type === 'input_text' || item.type === 'output_text') && typeof item.text === 'string') {
       parts.push({ text: item.text });
     } else if (item.type === 'input_image') {
-      const inlineData = parseDataUrl(item.image_url);
-      if (inlineData) parts.push({ inlineData });
+      addInlineDataPart(parts, parseBase64DataUrl(item.image_url));
     } else if (item.type === 'input_file') {
-      const inlineData = parseDataUrl(item.file_data);
-      if (inlineData) parts.push({ inlineData });
+      addInlineDataPart(parts, parseBase64DataUrl(item.file_data), firstDefined(item.filename, item.file_name, item.name));
     }
   }
   return parts;

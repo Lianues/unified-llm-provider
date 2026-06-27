@@ -184,10 +184,15 @@ function filterInternalFields(obj: unknown): unknown {
   }
 
   // 处理对象
+  const record = obj as Record<string, unknown>;
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(record)) {
     // 跳过内部字段
     // 注意：不要在这里过滤 thoughtSignatures，因为它需要由 mapSignaturesToProvider 处理
+    // inlineData.name 仅用于本地存储/跨格式保留文件名，不是 Gemini API 字段。
+    if (key === 'name' && typeof record.mimeType === 'string' && typeof record.data === 'string') {
+      continue;
+    }
     if (key === 'durationMs' || key === 'streamOutputDurationMs' || key === 'thoughtDurationMs' || key === 'usageMetadata') {
       continue;
     }

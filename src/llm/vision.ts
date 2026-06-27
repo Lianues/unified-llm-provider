@@ -4,6 +4,12 @@
 
 import type { LLMConfig } from '../config/types.js';
 
+export interface Base64InlineData {
+  mimeType: string;
+  data: string;
+  name?: string;
+}
+
 const DOCUMENT_MIME_TYPES = new Set([
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -14,8 +20,26 @@ const DOCUMENT_MIME_TYPES = new Set([
 
 /** 检查是否为文档 MIME 类型（PDF / DOCX / PPTX / XLSX） */
 export function isDocumentMimeType(mimeType: string): boolean {
-  return DOCUMENT_MIME_TYPES.has(mimeType);
+  return DOCUMENT_MIME_TYPES.has(mimeType.toLowerCase());
 }
+
+
+/** 把内部 inlineData 转成 base64 data URL（不处理远程 URL/link）。 */
+export function toBase64DataUrl(inlineData: Pick<Base64InlineData, 'mimeType' | 'data'>): string {
+  return `data:${inlineData.mimeType};base64,${inlineData.data}`;
+}
+
+/** 解析 base64 data URL（不处理远程 URL/link）。 */
+export function parseBase64DataUrl(value: unknown): Base64InlineData | undefined {
+  if (typeof value !== 'string') return undefined;
+  const matched = /^data:([^;,]+)(?:;[^,]*)*;base64,(.*)$/is.exec(value);
+  if (!matched) return undefined;
+  return {
+    mimeType: matched[1],
+    data: matched[2],
+  };
+}
+
 
 /** PDF 原生直传: Gemini, Claude, OpenAI Responses */
 export function supportsNativePDF(config?: Pick<LLMConfig, 'provider'>): boolean {

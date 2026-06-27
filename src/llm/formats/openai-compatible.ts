@@ -15,6 +15,7 @@ import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
 import { mapDeepSeekThinkingLevel, mapOpenAIThinkingLevel } from './thinking-level.js';
+import { parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 
 export class OpenAICompatibleFormat implements FormatAdapter {
   constructor(private model: string, private providerKind: 'openai-compatible' | 'deepseek' = 'openai-compatible') {}
@@ -101,23 +102,24 @@ export class OpenAICompatibleFormat implements FormatAdapter {
           }
         } else {
           const contentBlocks: Record<string, unknown>[] = [];
-          let hasInlineImage = false;
+          let hasStructuredContent = false;
 
           for (const part of content.parts) {
             if (isTextPart(part) && part.thought !== true && part.text) {
               contentBlocks.push({ type: 'text', text: part.text });
             } else if (isInlineDataPart(part)) {
-              hasInlineImage = true;
-              contentBlocks.push({
-                type: 'image_url',
-                image_url: {
-                  url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
-                },
-              });
+              if (part.inlineData.mimeType.toLowerCase().startsWith('image/')) {
+                hasStructuredContent = true;
+                contentBlocks.push({
+                  type: 'image_url',
+                  image_url: {
+                    url: toBase64DataUrl(part.inlineData),
+                  },
+                });
+              }
             }
           }
-
-          if (hasInlineImage) {
+          if (hasStructuredContent) {
             messages.push({ role: 'user', content: contentBlocks });
           } else {
             const text = textParts.map(p => {
@@ -199,8 +201,7 @@ export class OpenAICompatibleFormat implements FormatAdapter {
       parts.push({ text: msg.content });
     } else if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
-        if (typeof block === 'string') parts.push({ text: block });
-        else if (block?.type === 'text' && typeof block.text === 'string') parts.push({ text: block.text });
+        appendOpenAIContentBlock(parts, block);
       }
     }
     if (msg.tool_calls) {
@@ -360,5 +361,24 @@ export class OpenAICompatibleFormat implements FormatAdapter {
     return {
       pendingToolCalls: new Map<number, { callId?: string; name: string; arguments: string; emitted?: boolean }>(),
     };
+  }
+}
+
+function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBase64DataUrl>): void {
+  if (!inlineData) return;
+  parts.push({ inlineData });
+}
+
+function appendOpenAIContentBlock(parts: Part[], block: unknown): void {
+  if (typeof block === 'string') {
+    parts.push({ text: block });
+    return;
+  }
+  if (!block || typeof block !== 'object') return;
+  const item = block as any;
+  if (item.type === 'text' && typeof item.text === 'string') {
+    parts.push({ text: item.text });
+  } else if (item.type === 'image_url') {
+    addInlineDataPart(parts, parseBase64DataUrl(item.image_url?.url));
   }
 }

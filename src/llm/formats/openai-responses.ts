@@ -10,7 +10,7 @@ import {
   LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, ProviderContextItem,
   isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart, isProviderContextPart,
 } from '../../types.js';
-import { isDocumentMimeType } from '../vision.js';
+import { parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
@@ -121,18 +121,11 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
             if (isTextPart(part) && part.thought !== true && part.text) {
               contentBlocks.push({ type: 'input_text', text: part.text });
             } else if (isInlineDataPart(part)) {
-              const mime = part.inlineData.mimeType;
-              if (isDocumentMimeType(mime)) {
-                contentBlocks.push({
-                  type: 'input_file',
-                  file_data: `data:${mime};base64,${part.inlineData.data}`,
-                });
-              } else {
-                contentBlocks.push({
-                  type: 'input_image',
-                  image_url: `data:${mime};base64,${part.inlineData.data}`,
-                });
-              }
+              contentBlocks.push({
+                type: 'input_file',
+                ...(part.inlineData.name ? { filename: part.inlineData.name } : {}),
+                file_data: toBase64DataUrl(part.inlineData),
+              });
             }
           }
           if (contentBlocks.length === 0) {
@@ -399,16 +392,6 @@ function toRecord(value: unknown): Record<string, unknown> {
   return { value };
 }
 
-function parseDataUrl(value: unknown): { mimeType: string; data: string } | undefined {
-  if (typeof value !== 'string') return undefined;
-  const matched = /^data:([^;,]+);base64,(.*)$/s.exec(value);
-  if (!matched) return undefined;
-  return {
-    mimeType: matched[1],
-    data: matched[2],
-  };
-}
-
 function createOpenAIResponsesProviderContext(item: any, endpoint: string): ProviderContextItem {
   return {
     provider: 'openai',
@@ -463,6 +446,16 @@ function mapUsageToOpenAIResponsesWire(usage: LLMCompactResponse['usageMetadata'
   };
 }
 
+function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBase64DataUrl>, name?: unknown): void {
+  if (!inlineData) return;
+  parts.push({
+    inlineData: {
+      ...inlineData,
+      ...(typeof name === 'string' && name ? { name } : {}),
+    },
+  });
+}
+
 function parseOpenAIResponsesContentBlocks(content: unknown): Part[] {
   if (typeof content === 'string') return content ? [{ text: content }] : [];
   if (!Array.isArray(content)) return [];
@@ -478,11 +471,9 @@ function parseOpenAIResponsesContentBlocks(content: unknown): Part[] {
     if ((item.type === 'input_text' || item.type === 'output_text' || item.type === 'text') && typeof item.text === 'string') {
       parts.push({ text: item.text });
     } else if (item.type === 'input_image') {
-      const inlineData = parseDataUrl(item.image_url);
-      if (inlineData) parts.push({ inlineData });
+      addInlineDataPart(parts, parseBase64DataUrl(item.image_url));
     } else if (item.type === 'input_file') {
-      const inlineData = parseDataUrl(item.file_data);
-      if (inlineData) parts.push({ inlineData });
+      addInlineDataPart(parts, parseBase64DataUrl(item.file_data), item.filename ?? item.file_name ?? item.name);
     }
   }
   return parts;

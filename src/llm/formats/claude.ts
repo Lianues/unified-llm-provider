@@ -98,37 +98,26 @@ export class ClaudeFormat implements FormatAdapter {
           messages.push({ role: 'user', content: contentBlocks });
         } else {
           const contentBlocks: Record<string, unknown>[] = [];
-          let hasInlineImage = false;
+          let hasStructuredContent = false;
 
           for (const part of content.parts) {
             if (isTextPart(part) && part.thought !== true && part.text) {
               contentBlocks.push({ type: 'text', text: part.text });
             } else if (isInlineDataPart(part)) {
-              hasInlineImage = true;
+              hasStructuredContent = true;
               const mime = part.inlineData.mimeType;
-              if (mime === 'application/pdf') {
-                contentBlocks.push({
-                  type: 'document',
-                  source: {
-                    type: 'base64',
-                    media_type: mime,
-                    data: part.inlineData.data,
-                  },
-                });
-              } else {
-                contentBlocks.push({
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: mime,
-                    data: part.inlineData.data,
-                  },
-                });
-              }
+              contentBlocks.push({
+                type: 'document',
+                source: {
+                  type: 'base64',
+                  media_type: mime,
+                  data: part.inlineData.data,
+                },
+              });
             }
           }
 
-          if (hasInlineImage) {
+          if (hasStructuredContent) {
             messages.push({ role: 'user', content: contentBlocks });
           } else {
             const text = textParts.map(p => {

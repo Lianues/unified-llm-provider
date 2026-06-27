@@ -57,6 +57,125 @@ describe('format bridge', () => {
     expect(raw.contents[0].parts[0].thoughtSignature).toBe('openai-responses:enc_sig_1');
   });
 
+  it('base64 文件可在 Claude 与 unified 之间互转，不按 MIME 做图片判断', () => {
+    const unified = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: '请读取文件' },
+          { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'image.jpg' } },
+        ],
+      }],
+    };
+
+    const claude = convertRequest(unified, {
+      from: 'unified',
+      to: 'claude',
+      model: 'claude-sonnet-4',
+    }) as any;
+
+    const documentBlock = claude.messages[0].content.find((block: any) => block.type === 'document');
+    expect(documentBlock).toMatchObject({
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: 'image/jpeg',
+        data: 'aW1n',
+      },
+    });
+    expect(documentBlock.title).toBeUndefined();
+
+    const roundTrip = convertRequest(claude, {
+      from: 'claude',
+      to: 'unified',
+      model: 'claude-sonnet-4',
+    }) as any;
+
+    expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
+      mimeType: 'image/jpeg',
+      data: 'aW1n',
+    });
+  });
+
+  it('OpenAI-compatible 只发送 image_url，并过滤非图片 inlineData', () => {
+    const unified = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: '请读取附件' },
+          { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'image.jpg' } },
+          { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=', name: 'paper.pdf' } },
+        ],
+      }],
+    };
+
+    const openai = convertRequest(unified, {
+      from: 'unified',
+      to: 'openai-compatible',
+      model: 'gpt-4o',
+    }) as any;
+
+    const content = openai.messages[0].content;
+    expect(content).toEqual([
+      { type: 'text', text: '请读取附件' },
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/jpeg;base64,aW1n' },
+      },
+    ]);
+
+    const roundTrip = convertRequest(openai, {
+      from: 'openai-compatible',
+      to: 'unified',
+      model: 'gpt-4o',
+    }) as any;
+
+    expect(roundTrip.contents[0].parts).toHaveLength(2);
+    expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
+      mimeType: 'image/jpeg',
+      data: 'aW1n',
+    });
+  });
+
+  it('base64 文件可在 OpenAI Responses 与 unified 之间互转，并保留 filename/name', () => {
+    const unified = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: '请读取附件' },
+          { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'image.jpg' } },
+        ],
+      }],
+    };
+
+    const responses = convertRequest(unified, {
+      from: 'unified',
+      to: 'openai-responses',
+      model: 'o3',
+    }) as any;
+
+    const content = responses.input[0].content;
+    expect(content[1]).toEqual({
+      type: 'input_file',
+      filename: 'image.jpg',
+      file_data: 'data:image/jpeg;base64,aW1n',
+    });
+
+    const roundTrip = convertRequest(responses, {
+      from: 'openai-responses',
+      to: 'unified',
+      model: 'o3',
+    }) as any;
+
+    expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
+      mimeType: 'image/jpeg',
+      data: 'aW1n',
+      name: 'image.jpg',
+    });
+  });
+
+
+
   it('stream converter 可把 Claude chunk 转成 unified chunk', () => {
     const converter = createStreamConverter({ from: 'claude', to: 'unified', model: 'claude-sonnet-4' });
     const chunk = converter.convert({

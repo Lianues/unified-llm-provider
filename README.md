@@ -116,6 +116,43 @@ const request = {
 };
 ```
 
+### 多模态 base64 文件
+
+`unified` 使用 Gemini-like 的 `inlineData` 作为统一的 base64 文件表示：
+
+```ts
+{
+  role: 'user',
+  parts: [
+    { text: '请读取这个文件' },
+    {
+      inlineData: {
+        mimeType: 'image/jpeg',
+        data: '...', // 纯 base64，不含 data: 前缀
+        name: 'image.jpg', // 可选；仅 OpenAI Responses 会发送为 input_file.filename
+      },
+    },
+  ],
+}
+```
+
+说明：
+
+- 当前只处理 base64 内联文件，不处理远程 URL / link / file_id。
+- 统一格式继续使用驼峰式字段：`inlineData.mimeType`。
+- 文件类型由用户端维护；本包不推断、不改写，只透传 `mimeType`（filetype）和 base64 `data`。
+- `name` 可以作为本地字段保留；发送上游时，只有 `openai-responses` 的 `input_file` 会保留为 `filename`，其它格式都会剥离。
+- 唯一过滤例外：`openai-compatible` 只支持 `image_url` 这类文件块，因此只发送 `image/*`，非图片 inlineData 会过滤。
+
+| 目标格式 | base64 映射 |
+|---|---|
+| `gemini` | `inlineData` |
+| `claude` | `document.source = { type: 'base64', media_type: mimeType, data }` |
+| `openai-compatible` | 仅 `image/*`：`image_url.url = data:<mimeType>;base64,<data>`；非图片过滤 |
+| `openai-responses` | `input_file.file_data = data:<mimeType>;base64,<data>`，如有 `name` 则发送为 `filename` |
+
+
+
 
 ### UsageMetadata / token 用量
 
