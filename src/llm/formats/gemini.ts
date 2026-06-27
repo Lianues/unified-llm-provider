@@ -9,6 +9,7 @@ import { LLMRequest, LLMResponse, LLMStreamChunk } from '../../types.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { sanitizeSchemaForGemini } from './schema-sanitizer.js';
 import { mapGeminiThinkingLevel } from './thinking-level.js';
+import { isSupportedToolResponseMimeType } from '../vision.js';
 
 export class GeminiFormat implements FormatAdapter {
 
@@ -29,6 +30,9 @@ export class GeminiFormat implements FormatAdapter {
     // 将内部统一的 callId 映射为 Gemini API 的 id 字段
     // Gemini 3 模型要求 functionCall 和 functionResponse 使用 id 字段进行配对
     mapCallIdsToGemini(filtered);
+
+    // Gemini 3 functionResponse.parts 只保留支持的图片/文档，并剥离本地 name。
+    sanitizeFunctionResponsePartsForGemini(filtered);
 
     // 过滤 Gemini 3 流式响应中产生的空 text part（text === "" 且无签名/thought）。
     // 这类空 part 由模型在 functionCall 后附带返回，回传时会导致 Gemini API 报 INTERNAL 错误。
@@ -189,10 +193,6 @@ function filterInternalFields(obj: unknown): unknown {
   for (const [key, value] of Object.entries(record)) {
     // 跳过内部字段
     // 注意：不要在这里过滤 thoughtSignatures，因为它需要由 mapSignaturesToProvider 处理
-    // inlineData.name 仅用于本地存储/跨格式保留文件名，不是 Gemini API 字段。
-    if (key === 'name' && typeof record.mimeType === 'string' && typeof record.data === 'string') {
-      continue;
-    }
     if (key === 'durationMs' || key === 'streamOutputDurationMs' || key === 'thoughtDurationMs' || key === 'usageMetadata') {
       continue;
     }
@@ -298,6 +298,40 @@ function mapCallIdsToGemini(obj: unknown): void {
 
   for (const value of Object.values(record)) {
     mapCallIdsToGemini(value);
+  }
+}
+
+function sanitizeFunctionResponsePartsForGemini(obj: unknown): void {
+  if (obj === null || obj === undefined || typeof obj !== 'object') return;
+  if (Array.isArray(obj)) {
+    obj.forEach(sanitizeFunctionResponsePartsForGemini);
+    return;
+  }
+
+  const record = obj as Record<string, any>;
+  if (record.functionResponse && typeof record.functionResponse === 'object') {
+    if (Array.isArray(record.functionResponse.parts)) {
+      record.functionResponse.parts = record.functionResponse.parts
+        .filter((part: any) => {
+          const inlineData = part?.inlineData;
+          return inlineData
+            && typeof inlineData.mimeType === 'string'
+            && typeof inlineData.data === 'string'
+            && isSupportedToolResponseMimeType(inlineData.mimeType);
+        })
+        .map((part: any) => {
+          delete part.inlineData.name;
+          return part;
+        });
+    }
+  }
+
+  if (record.inlineData && typeof record.inlineData === 'object') {
+    delete record.inlineData.name;
+  }
+
+  for (const value of Object.values(record)) {
+    sanitizeFunctionResponsePartsForGemini(value);
   }
 }
 

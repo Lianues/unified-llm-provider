@@ -23,6 +23,29 @@ export function isDocumentMimeType(mimeType: string): boolean {
   return DOCUMENT_MIME_TYPES.has(mimeType.toLowerCase());
 }
 
+const TOOL_RESPONSE_IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+]);
+
+const TOOL_RESPONSE_DOCUMENT_MIME_TYPES = new Set([
+  'application/pdf',
+  'text/plain',
+]);
+
+export function isToolResponseImageMimeType(mimeType: string): boolean {
+  return TOOL_RESPONSE_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
+}
+
+export function isToolResponseDocumentMimeType(mimeType: string): boolean {
+  return TOOL_RESPONSE_DOCUMENT_MIME_TYPES.has(mimeType.toLowerCase());
+}
+
+export function isSupportedToolResponseMimeType(mimeType: string): boolean {
+  return isToolResponseImageMimeType(mimeType) || isToolResponseDocumentMimeType(mimeType);
+}
+
 
 /** 把内部 inlineData 转成 base64 data URL（不处理远程 URL/link）。 */
 export function toBase64DataUrl(inlineData: Pick<Base64InlineData, 'mimeType' | 'data'>): string {

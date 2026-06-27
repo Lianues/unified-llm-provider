@@ -8,14 +8,14 @@
  */
 
 import {
-  LLMRequest, LLMResponse, LLMStreamChunk, Part,
+  LLMRequest, LLMResponse, LLMStreamChunk, Part, FunctionResponsePart,
   isTextPart, isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart,
 } from '../../types.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
 import { mapDeepSeekThinkingLevel, mapOpenAIThinkingLevel } from './thinking-level.js';
-import { parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
+import { isToolResponseDocumentMimeType, isToolResponseImageMimeType, parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 
 export class OpenAICompatibleFormat implements FormatAdapter {
   constructor(private model: string, private providerKind: 'openai-compatible' | 'deepseek' = 'openai-compatible') {}
@@ -97,7 +97,7 @@ export class OpenAICompatibleFormat implements FormatAdapter {
             messages.push({
               role: 'tool',
               tool_call_id: callId,
-              content: JSON.stringify(part.functionResponse.response),
+              content: encodeOpenAICompatibleToolResultContent(part.functionResponse),
             });
           }
         } else {
@@ -108,12 +108,21 @@ export class OpenAICompatibleFormat implements FormatAdapter {
             if (isTextPart(part) && part.thought !== true && part.text) {
               contentBlocks.push({ type: 'text', text: part.text });
             } else if (isInlineDataPart(part)) {
-              if (part.inlineData.mimeType.toLowerCase().startsWith('image/')) {
+              const mime = part.inlineData.mimeType;
+              if (isToolResponseImageMimeType(mime)) {
                 hasStructuredContent = true;
                 contentBlocks.push({
                   type: 'image_url',
                   image_url: {
                     url: toBase64DataUrl(part.inlineData),
+                  },
+                });
+              } else if (isToolResponseDocumentMimeType(mime)) {
+                hasStructuredContent = true;
+                contentBlocks.push({
+                  type: 'file',
+                  file: {
+                    file_data: toBase64DataUrl(part.inlineData),
                   },
                 });
               }
@@ -369,6 +378,47 @@ function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBas
   parts.push({ inlineData });
 }
 
+function parseOpenAICompatibleFilePart(item: any): ReturnType<typeof parseBase64DataUrl> | undefined {
+  const file = item.file && typeof item.file === 'object' ? item.file : item;
+  const inlineData = parseBase64DataUrl(file.file_data ?? file.data ?? item.file_data ?? item.data);
+  if (!inlineData) return undefined;
+  return isToolResponseDocumentMimeType(inlineData.mimeType) ? inlineData : undefined;
+}
+
+function encodeOpenAICompatibleToolMediaBlock(part: NonNullable<FunctionResponsePart['functionResponse']['parts']>[number]): Record<string, unknown> | undefined {
+  const mime = part.inlineData.mimeType;
+  if (isToolResponseImageMimeType(mime)) {
+    return {
+      type: 'image_url',
+      image_url: {
+        url: toBase64DataUrl(part.inlineData),
+      },
+    };
+  }
+  if (isToolResponseDocumentMimeType(mime)) {
+    return {
+      type: 'file',
+      file: {
+        file_data: toBase64DataUrl(part.inlineData),
+      },
+    };
+  }
+  return undefined;
+}
+
+function encodeOpenAICompatibleToolResultContent(response: FunctionResponsePart['functionResponse']): unknown {
+  const text = JSON.stringify(response.response);
+  const mediaBlocks = (response.parts ?? [])
+    .map(part => encodeOpenAICompatibleToolMediaBlock(part))
+    .filter((block): block is Record<string, unknown> => !!block);
+
+  if (mediaBlocks.length === 0) return text;
+  return [
+    { type: 'text', text },
+    ...mediaBlocks,
+  ];
+}
+
 function appendOpenAIContentBlock(parts: Part[], block: unknown): void {
   if (typeof block === 'string') {
     parts.push({ text: block });
@@ -380,5 +430,7 @@ function appendOpenAIContentBlock(parts: Part[], block: unknown): void {
     parts.push({ text: item.text });
   } else if (item.type === 'image_url') {
     addInlineDataPart(parts, parseBase64DataUrl(item.image_url?.url));
+  } else if (item.type === 'file') {
+    addInlineDataPart(parts, parseOpenAICompatibleFilePart(item));
   }
 }

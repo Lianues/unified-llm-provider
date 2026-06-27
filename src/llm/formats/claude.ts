@@ -5,13 +5,14 @@
  */
 
 import {
-  LLMRequest, LLMResponse, LLMStreamChunk, Part, FunctionCallPart,
+  LLMRequest, LLMResponse, LLMStreamChunk, Part, FunctionCallPart, FunctionResponsePart,
   isTextPart, isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart,
 } from '../../types.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForClaude } from './schema-sanitizer.js';
 import { mapClaudeThinkingLevel } from './thinking-level.js';
+import { isToolResponseDocumentMimeType, isToolResponseImageMimeType } from '../vision.js';
 
 export class ClaudeFormat implements FormatAdapter {
   constructor(private model: string, private promptCaching?: boolean, private autoCaching?: boolean) {}
@@ -92,7 +93,7 @@ export class ClaudeFormat implements FormatAdapter {
             contentBlocks.push({
               type: 'tool_result',
               tool_use_id: toolUseId,
-              content: JSON.stringify(part.functionResponse.response),
+              content: encodeClaudeToolResultContent(part.functionResponse),
             });
           }
           messages.push({ role: 'user', content: contentBlocks });
@@ -447,6 +448,46 @@ function buildClaudeUsageMetadata(usage: any): LLMResponse['usageMetadata'] {
     totalTokenCount: promptTotal + output,
   };
 }
+
+function encodeClaudeToolResultContent(response: FunctionResponsePart['functionResponse']): unknown {
+  const text = JSON.stringify(response.response);
+  const mediaBlocks = (response.parts ?? [])
+    .map(part => encodeClaudeToolResultMediaBlock(part))
+    .filter((block): block is Record<string, unknown> => !!block);
+
+  if (mediaBlocks.length === 0) return text;
+  return [
+    { type: 'text', text },
+    ...mediaBlocks,
+  ];
+}
+
+function encodeClaudeToolResultMediaBlock(part: NonNullable<FunctionResponsePart['functionResponse']['parts']>[number]): Record<string, unknown> | undefined {
+  const inlineData = part.inlineData;
+  const mime = inlineData.mimeType;
+  if (isToolResponseImageMimeType(mime)) {
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mime,
+        data: inlineData.data,
+      },
+    };
+  }
+  if (isToolResponseDocumentMimeType(mime)) {
+    return {
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: mime,
+        data: inlineData.data,
+      },
+    };
+  }
+  return undefined;
+}
+
 
 function mapStopReason(reason: string | undefined): string {
   switch (reason) {

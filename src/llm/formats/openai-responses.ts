@@ -7,10 +7,10 @@
  */
 
 import {
-  LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, ProviderContextItem,
+  LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, FunctionResponsePart, ProviderContextItem,
   isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart, isProviderContextPart,
 } from '../../types.js';
-import { parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
+import { isSupportedToolResponseMimeType, parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
@@ -112,7 +112,7 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
             inputItems.push({
               type: 'function_call_output',
               call_id: callId,
-              output: JSON.stringify(part.functionResponse.response),
+              output: encodeOpenAIResponsesToolResultOutput(part.functionResponse),
             });
           }
         } else {
@@ -454,6 +454,23 @@ function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBas
       ...(typeof name === 'string' && name ? { name } : {}),
     },
   });
+}
+
+function encodeOpenAIResponsesToolResultOutput(response: FunctionResponsePart['functionResponse']): unknown {
+  const text = JSON.stringify(response.response);
+  const fileBlocks = (response.parts ?? [])
+    .filter((part): part is NonNullable<FunctionResponsePart['functionResponse']['parts']>[number] => isSupportedToolResponseMimeType(part.inlineData.mimeType))
+    .map((part): Record<string, unknown> => ({
+      type: 'input_file',
+      ...(part.inlineData.name ? { filename: part.inlineData.name } : {}),
+      file_data: toBase64DataUrl(part.inlineData),
+    }));
+
+  if (fileBlocks.length === 0) return text;
+  return [
+    { type: 'output_text', text },
+    ...fileBlocks,
+  ];
 }
 
 function parseOpenAIResponsesContentBlocks(content: unknown): Part[] {

@@ -148,8 +148,46 @@ const request = {
 |---|---|
 | `gemini` | `inlineData` |
 | `claude` | `document.source = { type: 'base64', media_type: mimeType, data }` |
-| `openai-compatible` | 仅 `image/*`：`image_url.url = data:<mimeType>;base64,<data>`；非图片过滤 |
+| `openai-compatible` | 图片：`image_url.url = data:<mimeType>;base64,<data>`；文档：`file.file_data = data:<mimeType>;base64,<data>`；其它过滤 |
 | `openai-responses` | `input_file.file_data = data:<mimeType>;base64,<data>`，如有 `name` 则发送为 `filename` |
+
+#### 工具响应中的多模态内容
+
+工具响应可在 `functionResponse.parts` 中附带内联文件：
+
+```ts
+{
+  functionResponse: {
+    name: 'get_image',
+    callId: 'call_1',
+    response: { ok: true },
+    parts: [
+      {
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: '...',
+          name: 'weather.jpg', // 本地字段；Gemini 工具响应发送时会剥离
+        },
+      },
+    ],
+  },
+}
+```
+
+工具响应会额外做 MIME 筛选，只保留各家都明确支持的图片/文档类型：
+
+- 图片：`image/png`、`image/jpeg`、`image/webp`
+- 文档：`application/pdf`、`text/plain`
+
+映射规则：
+
+| 目标格式 | 工具响应多模态映射 |
+|---|---|
+| `gemini` | `functionResponse.parts[].inlineData`；不生成引用，`name` 会剥离 |
+| `claude` | `tool_result.content[]` 中的 `image` / `document` block |
+| `openai-compatible` | 图片进入 `tool.content[]` 的 `image_url`；文档进入 `tool.content[]` 的 `file`；其它类型过滤 |
+| `openai-responses` | 图片/文档进入 `function_call_output.output[]` 的 `input_file`，如有 `name` 则发送为 `filename` |
+
 
 
 

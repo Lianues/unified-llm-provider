@@ -97,7 +97,7 @@ describe('format bridge', () => {
     });
   });
 
-  it('OpenAI-compatible 只发送 image_url，并过滤非图片 inlineData', () => {
+  it('OpenAI-compatible 发送图片 image_url 和文档 file，并过滤其它 inlineData', () => {
     const unified = {
       contents: [{
         role: 'user',
@@ -105,6 +105,7 @@ describe('format bridge', () => {
           { text: '请读取附件' },
           { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'image.jpg' } },
           { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=', name: 'paper.pdf' } },
+          { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==', name: 'voice.wav' } },
         ],
       }],
     };
@@ -122,6 +123,10 @@ describe('format bridge', () => {
         type: 'image_url',
         image_url: { url: 'data:image/jpeg;base64,aW1n' },
       },
+      {
+        type: 'file',
+        file: { file_data: 'data:application/pdf;base64,JVBERi0=' },
+      },
     ]);
 
     const roundTrip = convertRequest(openai, {
@@ -130,10 +135,14 @@ describe('format bridge', () => {
       model: 'gpt-4o',
     }) as any;
 
-    expect(roundTrip.contents[0].parts).toHaveLength(2);
+    expect(roundTrip.contents[0].parts).toHaveLength(3);
     expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
       mimeType: 'image/jpeg',
       data: 'aW1n',
+    });
+    expect(roundTrip.contents[0].parts[2].inlineData).toEqual({
+      mimeType: 'application/pdf',
+      data: 'JVBERi0=',
     });
   });
 
@@ -170,9 +179,138 @@ describe('format bridge', () => {
     expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
       mimeType: 'image/jpeg',
       data: 'aW1n',
+
       name: 'image.jpg',
     });
   });
+
+
+  it('工具响应多模态在 Claude 中仅保留图片/文档', () => {
+    const raw = convertRequest({
+      contents: [
+        { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: {}, callId: 'toolu_1' } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'get_weather',
+              callId: 'toolu_1',
+              response: { temperature: '15 degrees' },
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: 'aW1n' } },
+                { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' } },
+                { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+              ],
+            },
+          }],
+        },
+      ],
+    }, { from: 'unified', to: 'claude', model: 'claude-sonnet-4' }) as any;
+
+    const toolResult = raw.messages[1].content[0];
+    expect(toolResult.content).toEqual([
+      { type: 'text', text: '{"temperature":"15 degrees"}' },
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: 'aW1n' },
+      },
+      {
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' },
+      },
+    ]);
+  });
+
+  it('工具响应多模态在 OpenAI-compatible 中保留图片 image_url 和文档 file', () => {
+    const raw = convertRequest({
+      contents: [
+        { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: {}, callId: 'call_1' } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'get_weather',
+              callId: 'call_1',
+              response: { temperature: '15 degrees' },
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: 'aW1n' } },
+                { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' } },
+              ],
+            },
+          }],
+        },
+      ],
+    }, { from: 'unified', to: 'openai-compatible', model: 'gpt-4o' }) as any;
+
+    expect(raw.messages[1]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: [
+        { type: 'text', text: '{"temperature":"15 degrees"}' },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,aW1n' } },
+        { type: 'file', file: { file_data: 'data:application/pdf;base64,JVBERi0=' } },
+      ],
+    });
+  });
+
+  it('工具响应多模态在 OpenAI Responses 中保留图片/文档为 input_file', () => {
+    const raw = convertRequest({
+      contents: [
+        { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: {}, callId: 'call_1' } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'get_weather',
+              callId: 'call_1',
+              response: { temperature: '15 degrees' },
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'weather.jpg' } },
+                { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=', name: 'weather.pdf' } },
+                { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+              ],
+            },
+          }],
+        },
+      ],
+    }, { from: 'unified', to: 'openai-responses', model: 'o3' }) as any;
+
+    expect(raw.input[1]).toEqual({
+      type: 'function_call_output',
+      call_id: 'call_1',
+      output: [
+        { type: 'output_text', text: '{"temperature":"15 degrees"}' },
+        { type: 'input_file', filename: 'weather.jpg', file_data: 'data:image/jpeg;base64,aW1n' },
+        { type: 'input_file', filename: 'weather.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' },
+      ],
+    });
+  });
+
+  it('工具响应多模态在 Gemini 中过滤为支持的图片/文档并剥离 name', () => {
+    const raw = convertRequest({
+      contents: [{
+        role: 'user',
+        parts: [{
+          functionResponse: {
+            name: 'get_image',
+            callId: 'call_1',
+            response: { ok: true },
+            parts: [
+              { inlineData: { mimeType: 'image/jpeg', data: 'aW1n', name: 'weather.jpg' } },
+              { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' } },
+              { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+            ],
+          },
+        }],
+      }],
+    }, { from: 'unified', to: 'gemini' }) as any;
+
+    expect(raw.contents[0].parts[0].functionResponse.parts).toEqual([
+      { inlineData: { mimeType: 'image/jpeg', data: 'aW1n' } },
+      { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' } },
+    ]);
+  });
+
 
 
 

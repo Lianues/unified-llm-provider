@@ -1,4 +1,4 @@
-import type { LLMCompactResponse, LLMRequest, LLMResponse, LLMStreamChunk, Content, Part, FunctionDeclaration, ProviderContextItem } from '../types/index.js';
+import type { LLMCompactResponse, LLMRequest, LLMResponse, LLMStreamChunk, Content, Part, FunctionDeclaration, ProviderContextItem, InlineDataPart } from '../types/index.js';
 import { isProviderContextPart, isTextPart } from '../types/index.js';
 import { normalizeCallId } from './formats/tool-call-ids.js';
 import { normalizeLLMRequestThoughtSignatures, normalizeLLMResponseThoughtSignatures, normalizeLLMStreamChunkThoughtSignatures, detectLLMRequestSignatureRepresentation } from '../signatures/normalize.js';
@@ -6,7 +6,7 @@ import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignat
 import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
 import { normalizeThinkingLevel } from './formats/thinking-level.js';
 import { isCompactFormatAdapter } from './formats/types.js';
-import { parseBase64DataUrl } from './vision.js';
+import { isSupportedToolResponseMimeType, isToolResponseDocumentMimeType, parseBase64DataUrl } from './vision.js';
 
 export type UnifiedFormatId = 'unified';
 export type WireFormatId = 'gemini' | 'claude' | 'openai-compatible' | 'openai-responses' | 'deepseek';
@@ -79,6 +79,11 @@ function parseJSONValue(value: unknown): unknown {
     return value;
   }
 }
+
+function utf8ToBase64(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64');
+}
+
 
 function toRecord(value: unknown): Record<string, unknown> {
   if (isPlainObject(value)) return value;
@@ -201,6 +206,13 @@ function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBas
   });
 }
 
+function parseOpenAICompatibleFilePart(item: any): ReturnType<typeof parseBase64DataUrl> | undefined {
+  const file = item.file && typeof item.file === 'object' ? item.file : item;
+  const inlineData = parseBase64DataUrl(file.file_data ?? file.data ?? item.file_data ?? item.data);
+  if (!inlineData) return undefined;
+  return isToolResponseDocumentMimeType(inlineData.mimeType) ? inlineData : undefined;
+}
+
 function parseOpenAIContentBlocks(blocks: unknown): Part[] {
   if (!Array.isArray(blocks)) return [];
   const parts: Part[] = [];
@@ -215,10 +227,34 @@ function parseOpenAIContentBlocks(blocks: unknown): Part[] {
       parts.push({ text: item.text });
     } else if (item.type === 'image_url') {
       addInlineDataPart(parts, parseBase64DataUrl(item.image_url?.url));
+    } else if (item.type === 'file') {
+      addInlineDataPart(parts, parseOpenAICompatibleFilePart(item));
     }
   }
   return parts;
 }
+
+function decodeToolContentBlocks(parts: Part[]): { response: Record<string, unknown>; parts?: InlineDataPart[] } {
+  const text = parts
+    .filter((part): part is Part & { text?: string } => 'text' in part)
+    .map(part => part.text ?? '')
+    .join('\n');
+  const inlineParts = parts
+    .filter((part): part is InlineDataPart => 'inlineData' in part)
+    .filter(part => isSupportedToolResponseMimeType(part.inlineData.mimeType));
+  return {
+    response: toRecord(parseJSONValue(text)),
+    ...(inlineParts.length > 0 ? { parts: inlineParts } : {}),
+  };
+}
+
+function decodeToolContentValue(content: unknown, blockParser: (blocks: unknown) => Part[]): { response: Record<string, unknown>; parts?: InlineDataPart[] } {
+  if (Array.isArray(content)) {
+    return decodeToolContentBlocks(blockParser(content));
+  }
+  return { response: toRecord(parseJSONValue(content)) };
+}
+
 
 function parseOpenAIResponsesUserBlocks(blocks: unknown): Part[] {
   if (!Array.isArray(blocks)) return [];
@@ -274,6 +310,43 @@ function normalizeGeminiLikeRequest(raw: unknown): LLMRequest {
   });
 }
 
+const parseClaudeToolResultContent = (content: unknown): { response: Record<string, unknown>; parts?: InlineDataPart[] } => {
+    if (typeof content === 'string') {
+      return { response: toRecord(parseJSONValue(content)) };
+    }
+    if (!Array.isArray(content)) {
+      return { response: toRecord(parseJSONValue(content)) };
+    }
+
+    const textBlocks: string[] = [];
+    const inlineParts: InlineDataPart[] = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const item = block as any;
+      if (item.type === 'text' && typeof item.text === 'string') {
+        textBlocks.push(item.text);
+        continue;
+      }
+      if (item.type !== 'image' && item.type !== 'document') continue;
+      const source = item.source;
+      if (!source || typeof source !== 'object' || typeof source.media_type !== 'string' || typeof source.data !== 'string') continue;
+      if (!isSupportedToolResponseMimeType(source.media_type)) continue;
+      inlineParts.push({
+        inlineData: {
+          mimeType: source.media_type,
+          data: source.type === 'text' ? utf8ToBase64(source.data) : source.data,
+        },
+      });
+    }
+
+    const text = textBlocks.join('\n');
+    return {
+      response: toRecord(parseJSONValue(text)),
+      ...(inlineParts.length > 0 ? { parts: inlineParts } : {}),
+    };
+  };
+
+
 function decodeClaudeRequest(raw: unknown): LLMRequest {
   const data = raw as any;
   const contents: Content[] = [];
@@ -302,11 +375,13 @@ function decodeClaudeRequest(raw: unknown): LLMRequest {
       } else if (item.type === 'tool_result') {
         const callId = normalizeCallId(item.tool_use_id);
         const name = (callId && toolNameByCallId.get(callId)) || String(item.name ?? 'unknown_tool');
+        const decoded = parseClaudeToolResultContent(item.content);
         parts.push({
           functionResponse: {
             name,
-            response: toRecord(parseJSONValue(item.content)),
+            response: decoded.response,
             callId,
+            ...(decoded.parts ? { parts: decoded.parts } : {}),
           },
         });
       }
@@ -455,13 +530,15 @@ function decodeOpenAICompatibleRequest(raw: unknown): LLMRequest {
 
     if (message.role === 'tool') {
       const callId = normalizeCallId(message.tool_call_id);
+      const decoded = decodeToolContentValue(message.content, parseOpenAIContentBlocks);
       contents.push({
         role: 'user',
         parts: [{
           functionResponse: {
             name: (callId && toolNameByCallId.get(callId)) || String(message.name ?? 'unknown_tool'),
-            response: toRecord(parseJSONValue(message.content)),
+            response: decoded.response,
             callId,
+            ...(decoded.parts ? { parts: decoded.parts } : {}),
           },
         }],
       });
@@ -562,11 +639,13 @@ function decodeOpenAIResponsesRequest(raw: unknown): LLMRequest {
     if (item.type === 'function_call_output') {
       flushModel();
       const callId = normalizeCallId(item.call_id);
+      const decoded = decodeToolContentValue(item.output, parseOpenAIResponsesUserBlocks);
       pendingUserParts.push({
         functionResponse: {
           name: (callId && toolNameByCallId.get(callId)) || String(item.name ?? 'unknown_tool'),
-          response: toRecord(parseJSONValue(item.output)),
+          response: decoded.response,
           callId,
+          ...(decoded.parts ? { parts: decoded.parts } : {}),
         },
       });
       continue;
