@@ -263,7 +263,7 @@ export class LLMProvider implements LLMProviderLike {
 
   async compact<TOutput = LLMCompactResponse>(request: unknown, options?: LLMCompactOptions): Promise<TOutput> {
     const built = this.buildCompactProviderRequest(request, options);
-    const res = await sendRequest(built.endpoint, built.body, false, undefined, options?.signal, this.loggingDir);
+    const res = await sendRequest(built.endpoint, built.body, false, options?.signal, this.loggingDir);
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`LLM Compact API 错误 (${res.status}): ${text}`);
@@ -285,7 +285,7 @@ export class LLMProvider implements LLMProviderLike {
 
   async chat<TOutput = LLMResponse>(request: unknown, options?: LLMCallOptions): Promise<TOutput> {
     const built = this.buildProviderRequest(request, options, false);
-    const res = await sendRequest(built.endpoint, built.body, false, undefined, options?.signal, this.loggingDir);
+    const res = await sendRequest(built.endpoint, built.body, false, options?.signal, this.loggingDir);
     const canonicalResponse = await processResponse(res, this.format);
 
     return encodeResponseToFormat(canonicalResponse, {
@@ -298,7 +298,7 @@ export class LLMProvider implements LLMProviderLike {
 
   async *chatStream<TOutput = LLMStreamChunk>(request: unknown, options?: LLMCallOptions): AsyncGenerator<TOutput> {
     const built = this.buildProviderRequest(request, options, true);
-    const res = await sendRequest(built.endpoint, built.body, true, undefined, options?.signal, this.loggingDir);
+    const res = await sendRequest(built.endpoint, built.body, true, options?.signal, this.loggingDir);
 
     for await (const chunk of processStreamResponse(res, this.format)) {
       yield encodeStreamChunkToFormat(chunk, {
@@ -371,3 +371,4 @@ export class LLMProvider implements LLMProviderLike {
     return this.providerName;
   }
 }
+

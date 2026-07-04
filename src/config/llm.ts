@@ -39,11 +39,12 @@ export function parseSingleLLMConfig(raw: unknown = {}): LLMConfig {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw)
     ? raw as Record<string, unknown>
     : {};
+  const { timeoutMs: _timeoutMs, streamTimeoutMs: _streamTimeoutMs, ...restSource } = source;
   const provider = String(source.provider ?? 'gemini');
   const defaults = DEFAULTS[provider] ?? {};
 
   return {
-    ...source,
+    ...restSource,
     provider,
     format: typeof source.format === 'string' ? source.format : defaults.format,
     apiKey: typeof source.apiKey === 'string' ? source.apiKey : undefined,
@@ -64,8 +65,6 @@ export function parseSingleLLMConfig(raw: unknown = {}): LLMConfig {
       : undefined,
     promptCaching: source.promptCaching === true ? true : undefined,
     autoCaching: source.autoCaching === true ? true : undefined,
-    timeoutMs: typeof source.timeoutMs === 'number' ? source.timeoutMs : undefined,
-    streamTimeoutMs: typeof source.streamTimeoutMs === 'number' ? source.streamTimeoutMs : undefined,
     fetch: typeof source.fetch === 'function' ? source.fetch as LLMConfig['fetch'] : undefined,
     debug: source.debug && typeof source.debug === 'object' && !Array.isArray(source.debug)
       ? source.debug as LLMConfig['debug']
@@ -115,3 +114,5 @@ export function parseLLMConfig(raw: unknown = {}): LLMRegistryConfig {
     models: [toModelDef(DEFAULT_MODEL_NAME, raw)],
   };
 }
+
+

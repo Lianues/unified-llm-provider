@@ -74,10 +74,6 @@ export interface LLMConfig {
   promptCaching?: boolean;
   /** [Claude] 顶层自动缓存 */
   autoCaching?: boolean;
-  /** 非流式请求超时（毫秒） */
-  timeoutMs?: number;
-  /** 流式请求超时（毫秒） */
-  streamTimeoutMs?: number;
   /** 自定义 fetch 实现 */
   fetch?: FetchLike;
   /** 显式指定 HTTP/HTTPS 代理，例如 http://127.0.0.1:7890 */
@@ -97,3 +93,4 @@ export interface LLMRegistryConfig {
   defaultModelName: string;
   models: LLMModelDef[];
 }
+

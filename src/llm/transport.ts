@@ -22,10 +22,6 @@ export interface EndpointConfig {
   debug?: LLMDebugHooks;
   /** 显式指定 HTTP/HTTPS 代理 */
   proxy?: LLMProxyOption;
-  /** 非流式默认超时（毫秒） */
-  timeoutMs?: number;
-  /** 流式默认超时（毫秒） */
-  streamTimeoutMs?: number;
   /** 自定义 User-Agent */
   userAgent?: string;
 }
@@ -34,11 +30,6 @@ export interface BuiltRequestTransport {
   url: string;
   headers: Record<string, string>;
 }
-
-/** 非流式请求默认超时（毫秒） */
-const DEFAULT_TIMEOUT = 60_000;
-/** 流式请求默认超时（毫秒） */
-const DEFAULT_STREAM_TIMEOUT = 600_000;
 
 type ProxyAgentOptions = {
   uri: string;
@@ -78,40 +69,9 @@ async function callDebugHookSafely<T>(hook: ((event: T) => void | Promise<void>)
   }
 }
 
-function combineSignals(externalSignal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  if (!externalSignal) return timeoutSignal;
-
-  if (typeof AbortSignal.any === 'function') {
-    return AbortSignal.any([externalSignal, timeoutSignal]);
-  }
-
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(externalSignal.reason);
-  const onTimeout = () => controller.abort(timeoutSignal.reason);
-
-  if (externalSignal.aborted) {
-    controller.abort(externalSignal.reason);
-    return controller.signal;
-  }
-  if (timeoutSignal.aborted) {
-    controller.abort(timeoutSignal.reason);
-    return controller.signal;
-  }
-
-  externalSignal.addEventListener('abort', onAbort, { once: true });
-  timeoutSignal.addEventListener('abort', onTimeout, { once: true });
-  controller.signal.addEventListener('abort', () => {
-    externalSignal.removeEventListener('abort', onAbort);
-    timeoutSignal.removeEventListener('abort', onTimeout);
-  }, { once: true });
-
-  return controller.signal;
-}
-
-
-function settleFetchWithSignal<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
-  if (signal.aborted) return Promise.reject(errorFromAbortSignal(signal, timeoutMs));
+function settleFetchWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(errorFromAbortSignal(signal));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const cleanup = () => signal.removeEventListener('abort', onAbort);
@@ -127,22 +87,21 @@ function settleFetchWithSignal<T>(promise: Promise<T>, signal: AbortSignal, time
       cleanup();
       reject(error);
     };
-    const onAbort = () => finishReject(errorFromAbortSignal(signal, timeoutMs));
+    const onAbort = () => finishReject(errorFromAbortSignal(signal));
     signal.addEventListener('abort', onAbort, { once: true });
     promise.then(finishResolve, finishReject);
   });
 }
 
-function errorFromAbortSignal(signal: AbortSignal, timeoutMs: number): Error {
+function errorFromAbortSignal(signal: AbortSignal): Error {
   const reason = signal.reason;
   if (reason instanceof Error) return reason;
-  const error = new Error(reason ? String(reason) : `LLM request timed out after ${timeoutMs}ms`);
+  const error = new Error(reason ? String(reason) : 'LLM request aborted');
   error.name = reason && typeof reason === 'object' && 'name' in reason && typeof (reason as { name?: unknown }).name === 'string'
     ? (reason as { name: string }).name
     : 'AbortError';
   return error;
 }
-
 function normalizeProxyOption(proxy?: LLMProxyOption): NormalizedProxyOption | undefined {
   if (!proxy) return undefined;
 
@@ -210,12 +169,10 @@ export async function sendRequest(
   endpoint: EndpointConfig,
   body: unknown,
   stream: boolean,
-  timeout?: number,
   signal?: AbortSignal,
   _loggingDir?: string,
 ): Promise<Response> {
   const { url, headers } = buildRequestTransport(endpoint, stream);
-  const effectiveTimeout = timeout ?? (stream ? (endpoint.streamTimeoutMs ?? DEFAULT_STREAM_TIMEOUT) : (endpoint.timeoutMs ?? DEFAULT_TIMEOUT));
 
   await callDebugHookSafely(endpoint.debug?.onRequest, {
     url,
@@ -225,7 +182,7 @@ export async function sendRequest(
   });
 
   const fetchImpl = endpoint.fetch ?? fetch;
-  const requestSignal = combineSignals(signal, effectiveTimeout);
+  const requestSignal = signal;
   const init: RequestInit & { dispatcher?: unknown } = {
     method: 'POST',
     headers,
@@ -237,7 +194,7 @@ export async function sendRequest(
   try {
     const dispatcher = await getProxyDispatcher(endpoint.proxy);
     if (dispatcher) init.dispatcher = dispatcher;
-    res = await settleFetchWithSignal(fetchImpl(url, init), requestSignal, effectiveTimeout);
+    res = await settleFetchWithSignal(fetchImpl(url, init), requestSignal);
   } catch (err) {
     await callDebugHookSafely(endpoint.debug?.onResponse, {
       url,
@@ -336,3 +293,4 @@ function wrapStreamForDebug(res: Response, url: string, debug?: LLMDebugHooks): 
     headers: res.headers,
   });
 }
+
