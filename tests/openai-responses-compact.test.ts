@@ -191,4 +191,19 @@ describe('OpenAI Responses compact', () => {
 
     expect(raw).toEqual(rawCompactResponse);
   });
+
+
+  it('compact 自定义 fetch 未 settle 时会按 transport timeout reject，避免调用永久挂起', async () => {
+    const mockFetch = vi.fn(() => new Promise<Response>(() => undefined));
+    const provider = createOpenAIResponsesProvider({
+      provider: 'openai-responses',
+      model: 'gpt-5.4',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+      timeoutMs: 10,
+      fetch: mockFetch as any,
+    });
+
+    await expect(provider.compact(request)).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
 });

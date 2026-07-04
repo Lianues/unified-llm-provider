@@ -109,6 +109,40 @@ function combineSignals(externalSignal: AbortSignal | undefined, timeoutMs: numb
   return controller.signal;
 }
 
+
+function settleFetchWithSignal<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
+  if (signal.aborted) return Promise.reject(errorFromAbortSignal(signal, timeoutMs));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const finishResolve = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const finishReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => finishReject(errorFromAbortSignal(signal, timeoutMs));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(finishResolve, finishReject);
+  });
+}
+
+function errorFromAbortSignal(signal: AbortSignal, timeoutMs: number): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error(reason ? String(reason) : `LLM request timed out after ${timeoutMs}ms`);
+  error.name = reason && typeof reason === 'object' && 'name' in reason && typeof (reason as { name?: unknown }).name === 'string'
+    ? (reason as { name: string }).name
+    : 'AbortError';
+  return error;
+}
+
 function normalizeProxyOption(proxy?: LLMProxyOption): NormalizedProxyOption | undefined {
   if (!proxy) return undefined;
 
@@ -191,18 +225,19 @@ export async function sendRequest(
   });
 
   const fetchImpl = endpoint.fetch ?? fetch;
-  const dispatcher = await getProxyDispatcher(endpoint.proxy);
+  const requestSignal = combineSignals(signal, effectiveTimeout);
   const init: RequestInit & { dispatcher?: unknown } = {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: combineSignals(signal, effectiveTimeout),
+    signal: requestSignal,
   };
-  if (dispatcher) init.dispatcher = dispatcher;
 
   let res: Response;
   try {
-    res = await fetchImpl(url, init);
+    const dispatcher = await getProxyDispatcher(endpoint.proxy);
+    if (dispatcher) init.dispatcher = dispatcher;
+    res = await settleFetchWithSignal(fetchImpl(url, init), requestSignal, effectiveTimeout);
   } catch (err) {
     await callDebugHookSafely(endpoint.debug?.onResponse, {
       url,
