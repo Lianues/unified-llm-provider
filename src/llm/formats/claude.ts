@@ -233,18 +233,10 @@ export class ClaudeFormat implements FormatAdapter {
 
     switch (data.type) {
       case 'message_start':
-        // message_start 事件中包含 input_tokens
-        if (data.message?.usage) {
-          const u = data.message.usage;
-          st.inputTokens = (u.input_tokens ?? 0)
-            + (u.cache_creation_input_tokens ?? 0)
-            + (u.cache_read_input_tokens ?? 0);
-          st.hasCachedContentTokens = hasOwn(u, 'cache_read_input_tokens');
-          st.cachedContentTokens = u.cache_read_input_tokens ?? 0;
-          st.hasCacheCreationInputTokens = hasOwn(u, 'cache_creation_input_tokens');
-          st.cacheCreationInputTokens = u.cache_creation_input_tokens ?? 0;
-          st.cacheCreationInputTokensDetails = decodeCacheCreationInputTokensDetails(u.cache_creation);
-        }
+        // input_tokens 通常在 message_start 回传；但部分上游（如智谱 GLM 的
+        // Anthropic 兼容端点）在此处回传 0，真实值放在 message_delta。两处都会
+        // ingest，取较大值，因此顺序与是否重复都不影响结果。
+        ingestClaudeUsageIntoState(st, data.message?.usage);
         break;
 
       case 'content_block_start':
@@ -315,6 +307,9 @@ export class ClaudeFormat implements FormatAdapter {
           // 工具调用已在 content_block_stop 时逐个输出，这里不再需要批量输出
         }
         if (data.usage) {
+          // 官方 Claude 会在 message_delta 中重复回传 input_tokens/cache 字段；
+          // 智谱 GLM 则只在这里回传真实的 input_tokens。统一在此再次 ingest。
+          ingestClaudeUsageIntoState(st, data.usage);
           const outputTokens = data.usage.output_tokens ?? 0;
           const thinkingTokens = data.usage.output_tokens_details?.thinking_tokens;
           chunk.usageMetadata = {
@@ -410,6 +405,40 @@ interface ClaudeStreamState extends StreamDecodeState {
 
 function hasOwn(value: unknown, key: string): boolean {
   return !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+/**
+ * 将一个 Claude usage 对象（来自 message_start 或 message_delta）合并进流式状态。
+ *
+ * 兼容两类上游：
+ *  - 官方 Claude：input_tokens/cache_* 在 message_start 就位，message_delta 会重复回传相同值；
+ *  - 智谱 GLM 兼容端点：message_start 的 input_tokens 为 0，真实值只在 message_delta 出现。
+ *
+ * 因此对 input 总量取「已见过的最大值」，避免 delta 里的 0 覆盖 start 里的正确值，
+ * 也避免 start 里的 0 压制 delta 里的真实值。cache 字段一旦出现即记录。
+ */
+function ingestClaudeUsageIntoState(st: ClaudeStreamState, usage: any): void {
+  if (!usage || typeof usage !== 'object') return;
+
+  const mergedInput = (usage.input_tokens ?? 0)
+    + (usage.cache_creation_input_tokens ?? 0)
+    + (usage.cache_read_input_tokens ?? 0);
+  if (mergedInput > (st.inputTokens ?? 0)) {
+    st.inputTokens = mergedInput;
+  }
+
+  if (hasOwn(usage, 'cache_read_input_tokens')) {
+    st.hasCachedContentTokens = true;
+    st.cachedContentTokens = usage.cache_read_input_tokens ?? 0;
+  }
+  if (hasOwn(usage, 'cache_creation_input_tokens')) {
+    st.hasCacheCreationInputTokens = true;
+    st.cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
+  }
+  const details = decodeCacheCreationInputTokensDetails(usage.cache_creation);
+  if (details) {
+    st.cacheCreationInputTokensDetails = details;
+  }
 }
 
 function decodeCacheCreationInputTokensDetails(

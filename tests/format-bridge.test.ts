@@ -524,4 +524,69 @@ describe('format bridge', () => {
       totalTokenCount: 5128,
     });
   });
+
+  it('stream converter 处理智谱 GLM：input_tokens/cache 只在 message_delta 回传', () => {
+    const converter = createStreamConverter({ from: 'claude', to: 'unified', model: 'glm-5.2' });
+
+    // GLM 的 message_start.usage 里 input/output 都是 0
+    converter.convert({
+      type: 'message_start',
+      message: { usage: { input_tokens: 0, output_tokens: 0 } },
+    });
+
+    // 真实的 input_tokens / cache_read 只在 message_delta 出现
+    const chunk = converter.convert({
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+      usage: {
+        input_tokens: 334,
+        cache_read_input_tokens: 110528,
+        output_tokens: 88,
+      },
+    }) as any;
+
+    expect(chunk.usageMetadata).toMatchObject({
+      // 334 + 0(cache_creation) + 110528(cache_read)
+      promptTokenCount: 110862,
+      cachedContentTokenCount: 110528,
+      candidatesTokenCount: 88,
+      totalTokenCount: 110950,
+    });
+  });
+
+  it('stream converter 官方 Claude：message_delta 重复回传相同 input_tokens 不会双计', () => {
+    const converter = createStreamConverter({ from: 'claude', to: 'unified', model: 'claude-opus-4-8' });
+
+    converter.convert({
+      type: 'message_start',
+      message: {
+        usage: {
+          input_tokens: 35907,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 4,
+        },
+      },
+    });
+
+    // 官方 Claude 在 message_delta 里重复相同的 input_tokens
+    const chunk = converter.convert({
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+      usage: {
+        input_tokens: 35907,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 482,
+        output_tokens_details: { thinking_tokens: 88 },
+      },
+    }) as any;
+
+    expect(chunk.usageMetadata).toMatchObject({
+      promptTokenCount: 35907,
+      candidatesTokenCount: 482,
+      thoughtsTokenCount: 88,
+      totalTokenCount: 36389,
+    });
+  });
 });
