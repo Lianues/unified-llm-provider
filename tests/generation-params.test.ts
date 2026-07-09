@@ -272,9 +272,16 @@ describe('unified generation params', () => {
     } satisfies LLMRequest, { stream: false });
     expect((dry.body as any).reasoning_effort).toBe('medium');
 
-    const unsupported = await provider.dryRun({
+    const maxLevel = await provider.dryRun({
       contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
       generationConfig: { thinkingConfig: { thinkingLevel: 'max' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((maxLevel.body as any).reasoning_effort).toBe('max');
+
+    const unsupported = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'unknown' } },
     } satisfies LLMRequest, { stream: false });
 
     expect((unsupported.body as any).reasoning_effort).toBeUndefined();
@@ -295,6 +302,16 @@ describe('unified generation params', () => {
 
     expect((dry.body as any).reasoning).toEqual({
       effort: 'high',
+      summary: 'detailed',
+    });
+
+    const maxLevel = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: 'max' } },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((maxLevel.body as any).reasoning).toEqual({
+      effort: 'max',
       summary: 'detailed',
     });
   });

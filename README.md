@@ -626,7 +626,7 @@ const request = {
 | `maxOutputTokens` | `generationConfig.maxOutputTokens` | `max_tokens` | `max_tokens` | `max_output_tokens` |
 | `thinkingConfig.includeThoughts` | `generationConfig.thinkingConfig.includeThoughts` | 忽略 | 忽略 | 忽略 |
 | `thinkingConfig.thinkingBudget` | `generationConfig.thinkingConfig.thinkingBudget`；未显式传 `includeThoughts` 时自动补 `includeThoughts: true` | 无有效 `thinkingLevel` 时映射为 `thinking: { type: 'enabled', budget_tokens }` | 默认不映射 | 默认不映射 |
-| `thinkingConfig.thinkingLevel` | 仅支持 `minimal/low/medium/high` | 支持 `none/low/medium/high/xhigh/max` | 支持 `none/minimal/low/medium/high/xhigh` | 支持 `none/minimal/low/medium/high/xhigh` |
+| `thinkingConfig.thinkingLevel` | 仅支持 `minimal/low/medium/high` | 支持 `none/low/medium/high/xhigh/max` | 支持 `none/minimal/low/medium/high/xhigh/max` | 支持 `none/minimal/low/medium/high/xhigh/max` |
 | `thinkingConfig.reasoningMode` | 忽略 | 忽略 | 忽略 | `reasoning.mode`，支持 `standard/pro` |
 
 思考参数规则：
@@ -643,8 +643,8 @@ const request = {
 | Gemini | `minimal/low/medium/high` | `generationConfig.thinkingConfig.thinkingLevel = level`，并在未显式传 `includeThoughts` 时补 `includeThoughts: true` |
 | Claude | `none` | `thinking: { type: 'disabled' }` |
 | Claude | `low/medium/high/xhigh/max` | `thinking: { type: 'adaptive' }` + `output_config: { effort: level }` |
-| OpenAI Chat / OpenAI Compatible | `none/minimal/low/medium/high/xhigh` | `reasoning_effort = level` |
-| OpenAI Responses | `none/minimal/low/medium/high/xhigh` | `reasoning: { effort: level, summary: 'detailed' }` |
+| OpenAI Chat / OpenAI Compatible | `none/minimal/low/medium/high/xhigh/max` | `reasoning_effort = level` |
+| OpenAI Responses | `none/minimal/low/medium/high/xhigh/max` | `reasoning: { effort: level, summary: 'detailed' }` |
 | DeepSeek | `none` | `thinking: { type: 'disabled' }` |
 | DeepSeek | `high/max` | `thinking: { type: 'enabled' }` + `reasoning_effort = level` |
 

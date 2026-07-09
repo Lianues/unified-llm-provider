@@ -2,7 +2,7 @@ export type NormalizedThinkingLevel = 'not-set' | 'none' | 'minimal' | 'low' | '
 
 export type GeminiThinkingLevel = Extract<NormalizedThinkingLevel, 'minimal' | 'low' | 'medium' | 'high'>;
 export type ClaudeThinkingLevel = Extract<NormalizedThinkingLevel, 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'>;
-export type OpenAIThinkingLevel = Extract<NormalizedThinkingLevel, 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'>;
+export type OpenAIThinkingLevel = Extract<NormalizedThinkingLevel, 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'>;
 export type DeepSeekThinkingLevel = Extract<NormalizedThinkingLevel, 'none' | 'high' | 'max'>;
 
 const NON_SET_LEVELS = new Set(['not-set', 'non-set', 'not_set', 'non_set', 'notset', 'nonset', 'unset']);
@@ -67,6 +67,7 @@ export function mapOpenAIThinkingLevel(value: unknown): OpenAIThinkingLevel | un
     case 'medium':
     case 'high':
     case 'xhigh':
+    case 'max':
       return level;
     default:
       return undefined;
