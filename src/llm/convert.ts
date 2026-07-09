@@ -4,7 +4,7 @@ import { normalizeCallId } from './formats/tool-call-ids.js';
 import { normalizeLLMRequestThoughtSignatures, normalizeLLMResponseThoughtSignatures, normalizeLLMStreamChunkThoughtSignatures, detectLLMRequestSignatureRepresentation } from '../signatures/normalize.js';
 import { serializeLLMRequestThoughtSignatures, serializeLLMResponseThoughtSignatures, serializeLLMStreamChunkThoughtSignatures } from '../signatures/serialize.js';
 import { createBuiltinFormatRegistry, type FormatFactoryOptions, type FormatRegistry } from '../registry/formats.js';
-import { normalizeThinkingLevel } from './formats/thinking-level.js';
+import { normalizeThinkingLevel, normalizeReasoningMode } from './formats/thinking-level.js';
 import { isCompactFormatAdapter } from './formats/types.js';
 import { isSupportedToolResponseMimeType, isToolResponseDocumentMimeType, parseBase64DataUrl } from './vision.js';
 
@@ -691,7 +691,10 @@ function decodeOpenAIResponsesRequest(raw: unknown): LLMRequest {
       ...(typeof data.max_output_tokens === 'number' ? { maxOutputTokens: data.max_output_tokens } : {}),
       ...(typeof data.temperature === 'number' ? { temperature: data.temperature } : {}),
       ...(typeof data.top_p === 'number' ? { topP: data.top_p } : {}),
-      ...(normalizeThinkingLevel(data.reasoning?.effort) ? { thinkingConfig: { thinkingLevel: normalizeThinkingLevel(data.reasoning.effort) } } : {}),
+      ...((normalizeThinkingLevel(data.reasoning?.effort) || normalizeReasoningMode(data.reasoning?.mode)) ? { thinkingConfig: {
+        ...(normalizeThinkingLevel(data.reasoning?.effort) ? { thinkingLevel: normalizeThinkingLevel(data.reasoning.effort) } : {}),
+        ...(normalizeReasoningMode(data.reasoning?.mode) ? { reasoningMode: normalizeReasoningMode(data.reasoning.mode) } : {}),
+      } } : {}),
     },
   }, { formatHint: 'openai-responses' });
 }

@@ -299,6 +299,55 @@ describe('unified generation params', () => {
     });
   });
 
+  it('OpenAI Responses 将 reasoningMode 映射为 reasoning.mode', async () => {
+    const provider = createOpenAIResponsesProvider({
+      provider: 'openai-responses',
+      model: 'gpt-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+    });
+
+    const dry = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          thinkingLevel: 'medium',
+          reasoningMode: 'pro',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((dry.body as any).reasoning).toEqual({
+      mode: 'pro',
+      effort: 'medium',
+      summary: 'detailed',
+    });
+
+    const modeOnly = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          reasoningMode: 'standard',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((modeOnly.body as any).reasoning).toEqual({
+      mode: 'standard',
+    });
+
+    const invalidMode = await provider.dryRun({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: {
+        thinkingConfig: {
+          reasoningMode: 'invalid',
+        },
+      },
+    } satisfies LLMRequest, { stream: false });
+
+    expect((invalidMode.body as any).reasoning).toBeUndefined();
+  });
+
   it('DeepSeek 只映射 none/high/max thinkingLevel，其它等级视为 non-set', async () => {
     const provider = createDeepSeekProvider({
       provider: 'deepseek',

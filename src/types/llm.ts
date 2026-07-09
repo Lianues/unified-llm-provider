@@ -14,6 +14,8 @@ export interface LLMThinkingConfig {
   thinkingBudget?: number;
   /** 思考强度等级。当前 Gemini 原生透传；Claude/OpenAI 系默认忽略。 */
   thinkingLevel?: string;
+  /** 推理模式。仅 OpenAI Responses 映射为 reasoning.mode；支持 standard/pro。 */
+  reasoningMode?: string;
   [key: string]: unknown;
 }
 

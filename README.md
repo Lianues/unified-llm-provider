@@ -610,6 +610,7 @@ const request = {
       includeThoughts: true,
       thinkingBudget: 10000,
       thinkingLevel: 'high',
+      reasoningMode: 'pro',
     },
   },
 };
@@ -626,6 +627,7 @@ const request = {
 | `thinkingConfig.includeThoughts` | `generationConfig.thinkingConfig.includeThoughts` | 忽略 | 忽略 | 忽略 |
 | `thinkingConfig.thinkingBudget` | `generationConfig.thinkingConfig.thinkingBudget`；未显式传 `includeThoughts` 时自动补 `includeThoughts: true` | 无有效 `thinkingLevel` 时映射为 `thinking: { type: 'enabled', budget_tokens }` | 默认不映射 | 默认不映射 |
 | `thinkingConfig.thinkingLevel` | 仅支持 `minimal/low/medium/high` | 支持 `none/low/medium/high/xhigh/max` | 支持 `none/minimal/low/medium/high/xhigh` | 支持 `none/minimal/low/medium/high/xhigh` |
+| `thinkingConfig.reasoningMode` | 忽略 | 忽略 | 忽略 | `reasoning.mode`，支持 `standard/pro` |
 
 思考参数规则：
 

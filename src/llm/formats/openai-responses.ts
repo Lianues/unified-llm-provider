@@ -14,7 +14,7 @@ import { isSupportedToolResponseMimeType, parseBase64DataUrl, toBase64DataUrl } 
 import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
-import { mapOpenAIResponsesThinkingLevel } from './thinking-level.js';
+import { mapOpenAIResponsesThinkingLevel, normalizeReasoningMode } from './thinking-level.js';
 
 export class OpenAIResponsesFormat implements CompactFormatAdapter {
   constructor(private model: string) {}
@@ -170,10 +170,11 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
       if (gc.topP !== undefined) body.top_p = gc.topP;
 
       const thinkingLevel = mapOpenAIResponsesThinkingLevel(gc.thinkingConfig?.thinkingLevel);
-      if (thinkingLevel) {
+      const reasoningMode = normalizeReasoningMode(gc.thinkingConfig?.reasoningMode);
+      if (thinkingLevel || reasoningMode) {
         body.reasoning = {
-          effort: thinkingLevel,
-          summary: 'detailed',
+          ...(reasoningMode ? { mode: reasoningMode } : {}),
+          ...(thinkingLevel ? { effort: thinkingLevel, summary: 'detailed' } : {}),
         };
       }
     }

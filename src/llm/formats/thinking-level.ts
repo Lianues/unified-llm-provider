@@ -86,3 +86,17 @@ export function mapDeepSeekThinkingLevel(value: unknown): DeepSeekThinkingLevel 
       return undefined;
   }
 }
+
+export type ReasoningMode = 'pro' | 'standard';
+
+export function normalizeReasoningMode(value: unknown): ReasoningMode | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case 'pro':
+    case 'standard':
+      return normalized;
+    default:
+      return undefined;
+  }
+}
