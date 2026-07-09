@@ -173,7 +173,7 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
       if (thinkingLevel) {
         body.reasoning = {
           effort: thinkingLevel,
-          summary: 'auto',
+          summary: 'detailed',
         };
       }
     }

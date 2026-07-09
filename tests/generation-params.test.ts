@@ -295,7 +295,7 @@ describe('unified generation params', () => {
 
     expect((dry.body as any).reasoning).toEqual({
       effort: 'high',
-      summary: 'auto',
+      summary: 'detailed',
     });
   });
 

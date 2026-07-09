@@ -642,7 +642,7 @@ const request = {
 | Claude | `none` | `thinking: { type: 'disabled' }` |
 | Claude | `low/medium/high/xhigh/max` | `thinking: { type: 'adaptive' }` + `output_config: { effort: level }` |
 | OpenAI Chat / OpenAI Compatible | `none/minimal/low/medium/high/xhigh` | `reasoning_effort = level` |
-| OpenAI Responses | `none/minimal/low/medium/high/xhigh` | `reasoning: { effort: level, summary: 'auto' }` |
+| OpenAI Responses | `none/minimal/low/medium/high/xhigh` | `reasoning: { effort: level, summary: 'detailed' }` |
 | DeepSeek | `none` | `thinking: { type: 'disabled' }` |
 | DeepSeek | `high/max` | `thinking: { type: 'enabled' }` + `reasoning_effort = level` |
 
