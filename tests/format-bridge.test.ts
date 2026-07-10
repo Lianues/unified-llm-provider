@@ -279,7 +279,7 @@ describe('format bridge', () => {
       type: 'function_call_output',
       call_id: 'call_1',
       output: [
-        { type: 'output_text', text: '{"temperature":"15 degrees"}' },
+        { type: 'input_text', text: '{"temperature":"15 degrees"}' },
         { type: 'input_file', filename: 'weather.jpg', file_data: 'data:image/jpeg;base64,aW1n' },
         { type: 'input_file', filename: 'weather.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' },
       ],

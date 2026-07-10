@@ -469,7 +469,7 @@ function encodeOpenAIResponsesToolResultOutput(response: FunctionResponsePart['f
 
   if (fileBlocks.length === 0) return text;
   return [
-    { type: 'output_text', text },
+    { type: 'input_text', text },
     ...fileBlocks,
   ];
 }
