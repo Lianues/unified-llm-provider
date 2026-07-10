@@ -10,7 +10,7 @@ import {
   LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, FunctionResponsePart, ProviderContextItem,
   isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart, isProviderContextPart,
 } from '../../types.js';
-import { isSupportedToolResponseMimeType, parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
+import { isSupportedToolResponseMimeType, isToolResponseImageMimeType, parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
@@ -121,11 +121,7 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
             if (isTextPart(part) && part.thought !== true && part.text) {
               contentBlocks.push({ type: 'input_text', text: part.text });
             } else if (isInlineDataPart(part)) {
-              contentBlocks.push({
-                type: 'input_file',
-                ...(part.inlineData.name ? { filename: part.inlineData.name } : {}),
-                file_data: toBase64DataUrl(part.inlineData),
-              });
+              contentBlocks.push(encodeOpenAIResponsesInputAttachment(part));
             }
           }
           if (contentBlocks.length === 0) {
@@ -457,20 +453,34 @@ function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBas
   });
 }
 
+function encodeOpenAIResponsesInputAttachment(
+  part: NonNullable<FunctionResponsePart['functionResponse']['parts']>[number],
+): Record<string, unknown> {
+  const dataUrl = toBase64DataUrl(part.inlineData);
+  if (isToolResponseImageMimeType(part.inlineData.mimeType)) {
+    return {
+      type: 'input_image',
+      detail: 'auto',
+      image_url: dataUrl,
+    };
+  }
+  return {
+    type: 'input_file',
+    ...(part.inlineData.name ? { filename: part.inlineData.name } : {}),
+    file_data: dataUrl,
+  };
+}
+
 function encodeOpenAIResponsesToolResultOutput(response: FunctionResponsePart['functionResponse']): unknown {
   const text = JSON.stringify(response.response);
-  const fileBlocks = (response.parts ?? [])
+  const attachmentBlocks = (response.parts ?? [])
     .filter((part): part is NonNullable<FunctionResponsePart['functionResponse']['parts']>[number] => isSupportedToolResponseMimeType(part.inlineData.mimeType))
-    .map((part): Record<string, unknown> => ({
-      type: 'input_file',
-      ...(part.inlineData.name ? { filename: part.inlineData.name } : {}),
-      file_data: toBase64DataUrl(part.inlineData),
-    }));
+    .map(encodeOpenAIResponsesInputAttachment);
 
-  if (fileBlocks.length === 0) return text;
+  if (attachmentBlocks.length === 0) return text;
   return [
     { type: 'input_text', text },
-    ...fileBlocks,
+    ...attachmentBlocks,
   ];
 }
 

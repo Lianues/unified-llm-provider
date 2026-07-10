@@ -146,7 +146,7 @@ describe('format bridge', () => {
     });
   });
 
-  it('base64 文件可在 OpenAI Responses 与 unified 之间互转，并保留 filename/name', () => {
+  it('图片可在 OpenAI Responses 与 unified 之间按 input_image 互转', () => {
     const unified = {
       contents: [{
         role: 'user',
@@ -165,9 +165,9 @@ describe('format bridge', () => {
 
     const content = responses.input[0].content;
     expect(content[1]).toEqual({
-      type: 'input_file',
-      filename: 'image.jpg',
-      file_data: 'data:image/jpeg;base64,aW1n',
+      type: 'input_image',
+      detail: 'auto',
+      image_url: 'data:image/jpeg;base64,aW1n',
     });
 
     const roundTrip = convertRequest(responses, {
@@ -179,8 +179,6 @@ describe('format bridge', () => {
     expect(roundTrip.contents[0].parts[1].inlineData).toEqual({
       mimeType: 'image/jpeg',
       data: 'aW1n',
-
-      name: 'image.jpg',
     });
   });
 
@@ -253,7 +251,7 @@ describe('format bridge', () => {
     });
   });
 
-  it('工具响应多模态在 OpenAI Responses 中保留图片/文档为 input_file', () => {
+  it('工具响应多模态在 OpenAI Responses 中区分 input_image 和 input_file', () => {
     const raw = convertRequest({
       contents: [
         { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: {}, callId: 'call_1' } }] },
@@ -280,7 +278,7 @@ describe('format bridge', () => {
       call_id: 'call_1',
       output: [
         { type: 'input_text', text: '{"temperature":"15 degrees"}' },
-        { type: 'input_file', filename: 'weather.jpg', file_data: 'data:image/jpeg;base64,aW1n' },
+        { type: 'input_image', detail: 'auto', image_url: 'data:image/jpeg;base64,aW1n' },
         { type: 'input_file', filename: 'weather.pdf', file_data: 'data:application/pdf;base64,JVBERi0=' },
       ],
     });
