@@ -66,13 +66,13 @@ describe('unified generation params', () => {
     expect(body.top_k).toBeUndefined();
   });
 
-  it('OpenAI Responses 仅在聊天记录末尾注入显式 Prompt Cache 断点', async () => {
+  it('OpenAI Responses key 模式只发送 prompt_cache_key，不发送显式断点或时间参数', async () => {
     const provider = createOpenAIResponsesProvider({
       provider: 'openai-responses',
       model: 'gpt-test',
       apiKey: 'sk-test',
       baseUrl: 'https://api.openai.test/v1',
-      promptCache: { enabled: true, ttl: '30m' },
+      promptCache: { enabled: true, mode: 'key', key: 'limcode:test-cache-key' },
     });
 
     const dry = await provider.dryRun({
@@ -90,9 +90,29 @@ describe('unified generation params', () => {
     const body = dry.body as any;
     expect(body.instructions).toBe('stable system prompt');
     expect(body.tools.at(-1).cache_control).toBeUndefined();
+    expect(body.prompt_cache_key).toBe('limcode:test-cache-key');
     expect(body.prompt_cache_options).toBeUndefined();
     expect(body.input).toHaveLength(1);
-    expect(body.input[0].role).toBe('user');
+    expect(body.input[0].content.at(-1).prompt_cache_breakpoint).toBeUndefined();
+  });
+
+  it('OpenAI Responses breakpoint 模式发送 prompt_cache_options 和聊天记录末尾断点', async () => {
+    const provider = createOpenAIResponsesProvider({
+      provider: 'openai-responses',
+      model: 'gpt-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+      promptCache: { enabled: true, mode: 'explicit', key: 'limcode:test-cache-key' },
+    });
+
+    const dry = await provider.dryRun({
+      systemInstruction: { parts: [{ text: 'stable system prompt' }] },
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    } satisfies LLMRequest, { stream: false });
+
+    const body = dry.body as any;
+    expect(body.prompt_cache_key).toBe('limcode:test-cache-key');
+    expect(body.prompt_cache_options).toEqual({ mode: 'explicit', ttl: '30m' });
     expect(body.input[0].content.at(-1).prompt_cache_breakpoint).toEqual({ mode: 'explicit' });
   });
 

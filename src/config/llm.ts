@@ -89,8 +89,10 @@ function normalizePromptCacheConfig(input: unknown): LLMPromptCacheConfig | unde
     : undefined;
   const ttl = normalizePromptCacheTtl(source.ttl);
   const mode = normalizePromptCacheMode(source.mode);
+  const key = typeof source.key === 'string' && source.key.trim() ? source.key.trim() : undefined;
   const config: LLMPromptCacheConfig = {
     ...(typeof source.enabled === 'boolean' ? { enabled: source.enabled } : {}),
+    ...(key ? { key } : {}),
     ...(ttl ? { ttl } : {}),
     ...(mode ? { mode } : {}),
     ...(normalizedBreakpoints && Object.keys(normalizedBreakpoints).length > 0 ? { breakpoints: normalizedBreakpoints } : {}),
@@ -103,7 +105,7 @@ function normalizePromptCacheTtl(value: unknown): LLMPromptCacheTtl | undefined 
 }
 
 function normalizePromptCacheMode(value: unknown): LLMPromptCacheMode | undefined {
-  return value === 'implicit' || value === 'explicit' ? value : undefined;
+  return value === 'key' || value === 'implicit' || value === 'explicit' ? value : undefined;
 }
 
 function normalizeModelName(value: unknown): string | undefined {

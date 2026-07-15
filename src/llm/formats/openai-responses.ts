@@ -20,6 +20,7 @@ import { mapOpenAIResponsesThinkingLevel, normalizeReasoningMode } from './think
 interface NormalizedOpenAIResponsesPromptCacheConfig {
   enabled: boolean;
   mode: LLMPromptCacheMode;
+  key?: string;
   ttl: '30m';
   breakpoints: {
     messages: boolean;
@@ -174,7 +175,7 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
     }
 
     if (this.promptCache.enabled) {
-      this.injectPromptCacheBreakpoints(body);
+      this.injectPromptCache(body);
     }
 
     if (request.generationConfig) {
@@ -198,9 +199,16 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
     return body;
   }
 
-  private injectPromptCacheBreakpoints(body: Record<string, any>): void {
+  private injectPromptCache(body: Record<string, any>): void {
+    if (this.promptCache.key) body.prompt_cache_key = this.promptCache.key;
+    if (this.promptCache.mode === 'key') return;
+
     const inputItems = Array.isArray(body.input) ? body.input : [];
     body.input = inputItems;
+    body.prompt_cache_options = {
+      mode: this.promptCache.mode === 'implicit' ? 'implicit' : 'explicit',
+      ttl: this.promptCache.ttl,
+    };
     if (this.promptCache.breakpoints.messages && !markLastOpenAIResponsesCacheableBlockAtRequestEnd(inputItems)) {
       inputItems.push(createOpenAICacheMarkerMessage(' '));
     }
@@ -473,9 +481,14 @@ function mapUsageToOpenAIResponsesWire(usage: LLMCompactResponse['usageMetadata'
 
 function normalizeOpenAIResponsesPromptCacheConfig(promptCache: LLMPromptCacheConfig | undefined): NormalizedOpenAIResponsesPromptCacheConfig {
   const breakpoints = promptCache?.breakpoints ?? {};
+  const key = typeof promptCache?.key === 'string' && promptCache.key.trim() ? promptCache.key.trim() : undefined;
+  const mode: LLMPromptCacheMode = promptCache?.mode === 'implicit' || promptCache?.mode === 'explicit'
+    ? promptCache.mode
+    : 'key';
   return {
-    enabled: promptCache?.enabled === true,
-    mode: promptCache?.mode === 'implicit' ? 'implicit' : 'explicit',
+    enabled: promptCache?.enabled === true && (mode !== 'key' || !!key),
+    mode,
+    ...(key ? { key } : {}),
     ttl: '30m',
     breakpoints: {
       messages: breakpoints.messages !== false,

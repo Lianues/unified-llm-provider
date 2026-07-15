@@ -51,7 +51,7 @@ export type LLMProxyOption = string | LLMProxyConfig;
 
 export type LLMPromptCacheTtl = '5m' | '30m' | '1h';
 
-export type LLMPromptCacheMode = 'implicit' | 'explicit';
+export type LLMPromptCacheMode = 'key' | 'implicit' | 'explicit';
 
 export interface LLMPromptCacheBreakpoints {
   /** 在系统提示词末尾写入缓存断点。 */
@@ -63,11 +63,13 @@ export interface LLMPromptCacheBreakpoints {
 }
 
 export interface LLMPromptCacheConfig {
-  /** 是否启用显式 Prompt Cache 断点。 */
+  /** 是否启用 Prompt Cache。 */
   enabled?: boolean;
+  /** [OpenAI Responses] 稳定 cache key，用于更可靠的自动缓存匹配。 */
+  key?: string;
   /** 缓存 TTL 档位；不同 provider 会自动裁剪到其支持的值。 */
   ttl?: LLMPromptCacheTtl;
-  /** [OpenAI Responses] 请求级断点策略，默认 explicit。 */
+  /** [OpenAI Responses] 缓存模式：key=仅发送 prompt_cache_key；implicit/explicit=使用 prompt_cache_options + 显式断点。 */
   mode?: LLMPromptCacheMode;
   /** 需要写入的断点位置；默认三处都启用。 */
   breakpoints?: LLMPromptCacheBreakpoints;
