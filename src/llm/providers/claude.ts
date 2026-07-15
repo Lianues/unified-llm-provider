@@ -13,7 +13,7 @@ export function createClaudeProvider(config: LLMConfig): LLMProvider {
   const baseUrl = (config.baseUrl || defaults.baseUrl || '').replace(/\/+$/, '');
 
   return new LLMProvider(
-    new ClaudeFormat(model, config.promptCaching, config.autoCaching),
+    new ClaudeFormat(model, config.promptCache ?? config.promptCaching, config.autoCaching),
     {
       url: config.endpoint?.url || `${baseUrl}/messages`,
       streamUrl: config.endpoint?.streamUrl,

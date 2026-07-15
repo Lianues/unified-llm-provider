@@ -66,6 +66,64 @@ describe('unified generation params', () => {
     expect(body.top_k).toBeUndefined();
   });
 
+  it('OpenAI Responses 仅在聊天记录末尾注入显式 Prompt Cache 断点', async () => {
+    const provider = createOpenAIResponsesProvider({
+      provider: 'openai-responses',
+      model: 'gpt-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.test/v1',
+      promptCache: { enabled: true, ttl: '30m' },
+    });
+
+    const dry = await provider.dryRun({
+      systemInstruction: { parts: [{ text: 'stable system prompt' }] },
+      tools: [{
+        functionDeclarations: [{
+          name: 'read_file',
+          description: 'Read a file',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        }],
+      }],
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    } satisfies LLMRequest, { stream: false });
+
+    const body = dry.body as any;
+    expect(body.instructions).toBe('stable system prompt');
+    expect(body.tools.at(-1).cache_control).toBeUndefined();
+    expect(body.prompt_cache_options).toBeUndefined();
+    expect(body.input).toHaveLength(1);
+    expect(body.input[0].role).toBe('user');
+    expect(body.input[0].content.at(-1).prompt_cache_breakpoint).toEqual({ mode: 'explicit' });
+  });
+
+  it('Claude 注入 Prompt Cache 三断点并使用 1h TTL', async () => {
+    const provider = createClaudeProvider({
+      provider: 'claude',
+      model: 'claude-test',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.anthropic.test/v1',
+      promptCache: { enabled: true, ttl: '1h' },
+    });
+
+    const dry = await provider.dryRun({
+      systemInstruction: { parts: [{ text: 'stable system prompt' }] },
+      tools: [{
+        functionDeclarations: [{
+          name: 'read_file',
+          description: 'Read a file',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        }],
+      }],
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    } satisfies LLMRequest, { stream: false });
+
+    const body = dry.body as any;
+    const cacheControl = { type: 'ephemeral', ttl: '1h' };
+    expect(body.tools.at(-1).cache_control).toEqual(cacheControl);
+    expect(body.system.at(-1).cache_control).toEqual(cacheControl);
+    expect(body.messages.at(-1).content.at(-1).cache_control).toEqual(cacheControl);
+  });
+
   it('Claude 映射 temperature/topP/topK/maxOutputTokens，静态 requestBody 覆盖统一参数，运行时 patch 再覆盖静态 requestBody', async () => {
     const provider = createClaudeProvider({
       provider: 'claude',

@@ -8,14 +8,34 @@ import {
   LLMRequest, LLMResponse, LLMStreamChunk, Part, FunctionCallPart, FunctionResponsePart,
   isTextPart, isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart,
 } from '../../types.js';
+import type { LLMPromptCacheConfig, LLMPromptCacheTtl } from '../../config/types.js';
 import { FormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForClaude } from './schema-sanitizer.js';
 import { mapClaudeThinkingLevel } from './thinking-level.js';
 import { isToolResponseDocumentMimeType, isToolResponseImageMimeType } from '../vision.js';
 
+interface NormalizedClaudePromptCacheConfig {
+  enabled: boolean;
+  ttl?: Extract<LLMPromptCacheTtl, '1h'>;
+  auto: boolean;
+  breakpoints: {
+    system: boolean;
+    tools: boolean;
+    messages: boolean;
+  };
+}
+
 export class ClaudeFormat implements FormatAdapter {
-  constructor(private model: string, private promptCaching?: boolean, private autoCaching?: boolean) {}
+  private readonly promptCache: NormalizedClaudePromptCacheConfig;
+
+  constructor(
+    private model: string,
+    promptCacheOrPromptCaching?: LLMPromptCacheConfig | boolean,
+    autoCaching?: boolean,
+  ) {
+    this.promptCache = normalizeClaudePromptCacheConfig(promptCacheOrPromptCaching, autoCaching);
+  }
 
   // ============ 编码请求：Gemini → Claude ============
 
@@ -169,14 +189,14 @@ export class ClaudeFormat implements FormatAdapter {
     // 启用手动缓存断点时，注入 Prompt Caching 标记。
     // 遵循 Anthropic 的缓存前缀层级：tools → system → messages。
     // 最多 3 个断点（Anthropic 允许最多 4 个）。
-    if (this.promptCaching) {
-      this.injectCacheBreakpoints(body);
+    if (this.promptCache.enabled) {
+      this.injectCacheBreakpoints(body, this.promptCache);
     }
 
     // 注入顶层自动缓存标记。
     // 服务端会自动将断点放置在最后一个可缓存的内容块上。
-    if (this.autoCaching) {
-      (body as any).cache_control = { type: 'ephemeral' };
+    if (this.promptCache.auto) {
+      (body as any).cache_control = createClaudeCacheControl(this.promptCache);
     }
 
     return body;
@@ -350,30 +370,30 @@ export class ClaudeFormat implements FormatAdapter {
    *   2. system   — 将字符串转换为 content-block 数组，标记最后一个块
    *   3. messages — 标记最后一条用户消息的最后一个内容块
    */
-  private injectCacheBreakpoints(body: Record<string, unknown>): void {
-    const cacheControl = { type: 'ephemeral' as const };
+  private injectCacheBreakpoints(body: Record<string, unknown>, config: NormalizedClaudePromptCacheConfig): void {
+    const cacheControl = createClaudeCacheControl(config);
 
     // 1. 标记最后一个工具定义
     const tools = body.tools as any[] | undefined;
-    if (tools && tools.length > 0) {
+    if (config.breakpoints.tools && tools && tools.length > 0) {
       tools[tools.length - 1].cache_control = cacheControl;
     }
 
     // 2. 将 system 从字符串转换为 content-block 数组并标记。
     //    Anthropic 接受 system 为字符串或内容块数组；
     //    需要数组形式才能附加 cache_control。
-    if (typeof body.system === 'string' && body.system) {
+    if (config.breakpoints.system && typeof body.system === 'string' && body.system) {
       body.system = [
         { type: 'text', text: body.system, cache_control: cacheControl },
       ];
-    } else if (Array.isArray(body.system) && body.system.length > 0) {
+    } else if (config.breakpoints.system && Array.isArray(body.system) && body.system.length > 0) {
       (body.system as any[])[body.system.length - 1].cache_control = cacheControl;
     }
 
     // 3. 标记最后一条用户消息的最后一个内容块。
     //    这会缓存整个对话历史前缀。
     const messages = body.messages as any[] | undefined;
-    if (messages && messages.length > 0) {
+    if (config.breakpoints.messages && messages && messages.length > 0) {
       for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
         if (msg.role !== 'user') continue;
@@ -384,12 +404,39 @@ export class ClaudeFormat implements FormatAdapter {
           msg.content = [{ type: 'text', text: msg.content }];
         }
 
+        if (!Array.isArray(msg.content) || msg.content.length === 0) continue;
         const lastBlock = msg.content[msg.content.length - 1];
         lastBlock.cache_control = cacheControl;
         break;
       }
     }
   }
+}
+
+function normalizeClaudePromptCacheConfig(
+  input: LLMPromptCacheConfig | boolean | undefined,
+  autoCaching?: boolean,
+): NormalizedClaudePromptCacheConfig {
+  const fromObject = input && typeof input === 'object' && !Array.isArray(input) ? input : undefined;
+  const enabled = fromObject ? fromObject.enabled !== false : input === true;
+  const breakpoints = fromObject?.breakpoints ?? {};
+  return {
+    enabled,
+    ...(fromObject?.ttl === '1h' ? { ttl: '1h' as const } : {}),
+    auto: autoCaching === true,
+    breakpoints: {
+      system: breakpoints.system !== false,
+      tools: breakpoints.tools !== false,
+      messages: breakpoints.messages !== false,
+    },
+  };
+}
+
+function createClaudeCacheControl(config: NormalizedClaudePromptCacheConfig): Record<string, string> {
+  return {
+    type: 'ephemeral',
+    ...(config.ttl === '1h' ? { ttl: '1h' } : {}),
+  };
 }
 
 interface ClaudeStreamState extends StreamDecodeState {

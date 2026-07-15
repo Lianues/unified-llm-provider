@@ -13,7 +13,7 @@ export function createOpenAIResponsesProvider(config: LLMConfig): LLMProvider {
   const baseUrl = (config.baseUrl || defaults.baseUrl || '').replace(/\/+$/, '');
 
   return new LLMProvider(
-    new OpenAIResponsesFormat(model),
+    new OpenAIResponsesFormat(model, config.promptCache),
     {
       url: config.endpoint?.url || `${baseUrl}/responses`,
       streamUrl: config.endpoint?.streamUrl,

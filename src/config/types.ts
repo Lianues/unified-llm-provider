@@ -49,6 +49,30 @@ export interface LLMProxyConfig {
 
 export type LLMProxyOption = string | LLMProxyConfig;
 
+export type LLMPromptCacheTtl = '5m' | '30m' | '1h';
+
+export type LLMPromptCacheMode = 'implicit' | 'explicit';
+
+export interface LLMPromptCacheBreakpoints {
+  /** 在系统提示词末尾写入缓存断点。 */
+  system?: boolean;
+  /** 在工具定义提示词末尾写入缓存断点。 */
+  tools?: boolean;
+  /** 在本次请求聊天记录末尾写入缓存断点。 */
+  messages?: boolean;
+}
+
+export interface LLMPromptCacheConfig {
+  /** 是否启用显式 Prompt Cache 断点。 */
+  enabled?: boolean;
+  /** 缓存 TTL 档位；不同 provider 会自动裁剪到其支持的值。 */
+  ttl?: LLMPromptCacheTtl;
+  /** [OpenAI Responses] 请求级断点策略，默认 explicit。 */
+  mode?: LLMPromptCacheMode;
+  /** 需要写入的断点位置；默认三处都启用。 */
+  breakpoints?: LLMPromptCacheBreakpoints;
+}
+
 export interface LLMConfig {
   provider: string;
   /** 默认使用哪个 wire format；未填则由 provider 自身决定 */
@@ -70,9 +94,11 @@ export interface LLMConfig {
   thinkingControl?: boolean;
   /** 自定义请求体，会深合并到 provider 编码后的最终请求体 */
   requestBody?: Record<string, unknown>;
-  /** [Claude] 手动 Prompt Caching */
+  /** Prompt Cache 显式断点配置（OpenAI Responses / Claude）。 */
+  promptCache?: LLMPromptCacheConfig;
+  /** [Deprecated] [Claude] 手动 Prompt Caching */
   promptCaching?: boolean;
-  /** [Claude] 顶层自动缓存 */
+  /** [Deprecated] [Claude] 顶层自动缓存 */
   autoCaching?: boolean;
   /** 自定义 fetch 实现 */
   fetch?: FetchLike;

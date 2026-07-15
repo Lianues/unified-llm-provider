@@ -1,4 +1,4 @@
-import type { LLMConfig, LLMModelDef, LLMRegistryConfig } from './types.js';
+import type { LLMConfig, LLMModelDef, LLMRegistryConfig, LLMPromptCacheConfig, LLMPromptCacheMode, LLMPromptCacheTtl } from './types.js';
 
 export const DEFAULT_MODEL_NAME = 'default';
 
@@ -63,6 +63,7 @@ export function parseSingleLLMConfig(raw: unknown = {}): LLMConfig {
     endpoint: source.endpoint && typeof source.endpoint === 'object' && !Array.isArray(source.endpoint)
       ? source.endpoint as LLMConfig['endpoint']
       : undefined,
+    promptCache: normalizePromptCacheConfig(source.promptCache),
     promptCaching: source.promptCaching === true ? true : undefined,
     autoCaching: source.autoCaching === true ? true : undefined,
     fetch: typeof source.fetch === 'function' ? source.fetch as LLMConfig['fetch'] : undefined,
@@ -71,6 +72,38 @@ export function parseSingleLLMConfig(raw: unknown = {}): LLMConfig {
       : undefined,
     name: typeof source.name === 'string' ? source.name : undefined,
   };
+}
+
+function normalizePromptCacheConfig(input: unknown): LLMPromptCacheConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const source = input as Record<string, unknown>;
+  const breakpoints = source.breakpoints && typeof source.breakpoints === 'object' && !Array.isArray(source.breakpoints)
+    ? source.breakpoints as Record<string, unknown>
+    : undefined;
+  const normalizedBreakpoints = breakpoints
+    ? {
+      ...(typeof breakpoints.system === 'boolean' ? { system: breakpoints.system } : {}),
+      ...(typeof breakpoints.tools === 'boolean' ? { tools: breakpoints.tools } : {}),
+      ...(typeof breakpoints.messages === 'boolean' ? { messages: breakpoints.messages } : {}),
+    } satisfies NonNullable<LLMPromptCacheConfig['breakpoints']>
+    : undefined;
+  const ttl = normalizePromptCacheTtl(source.ttl);
+  const mode = normalizePromptCacheMode(source.mode);
+  const config: LLMPromptCacheConfig = {
+    ...(typeof source.enabled === 'boolean' ? { enabled: source.enabled } : {}),
+    ...(ttl ? { ttl } : {}),
+    ...(mode ? { mode } : {}),
+    ...(normalizedBreakpoints && Object.keys(normalizedBreakpoints).length > 0 ? { breakpoints: normalizedBreakpoints } : {}),
+  };
+  return Object.keys(config).length > 0 ? config : undefined;
+}
+
+function normalizePromptCacheTtl(value: unknown): LLMPromptCacheTtl | undefined {
+  return value === '5m' || value === '30m' || value === '1h' ? value : undefined;
+}
+
+function normalizePromptCacheMode(value: unknown): LLMPromptCacheMode | undefined {
+  return value === 'implicit' || value === 'explicit' ? value : undefined;
 }
 
 function normalizeModelName(value: unknown): string | undefined {

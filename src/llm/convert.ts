@@ -1106,6 +1106,7 @@ export function convertRequest(raw: unknown, options: ConvertRequestOptions): un
     format: options.from,
     registry: options.registry,
     model: options.model,
+    promptCache: options.promptCache,
     promptCaching: options.promptCaching,
     autoCaching: options.autoCaching,
   });
@@ -1116,6 +1117,7 @@ export function convertRequest(raw: unknown, options: ConvertRequestOptions): un
     stream: options.stream,
     registry: options.registry,
     model: options.model,
+    promptCache: options.promptCache,
     promptCaching: options.promptCaching,
     autoCaching: options.autoCaching,
     signatureMode: options.signatureMode,
@@ -1132,6 +1134,7 @@ export function convertResponse(raw: unknown, options: ConvertResponseOptions): 
     format: options.from,
     registry: options.registry,
     model: options.model,
+    promptCache: options.promptCache,
     promptCaching: options.promptCaching,
     autoCaching: options.autoCaching,
   });
@@ -1141,6 +1144,7 @@ export function convertResponse(raw: unknown, options: ConvertResponseOptions): 
     sourceFormat: options.from,
     registry: options.registry,
     model: options.model,
+    promptCache: options.promptCache,
     promptCaching: options.promptCaching,
     autoCaching: options.autoCaching,
     signatureMode: options.signatureMode,
@@ -1431,6 +1435,7 @@ export function createStreamConverter(options: CreateStreamConverterOptions): { 
     format: options.from,
     registry: options.registry,
     model: options.model,
+    promptCache: options.promptCache,
     promptCaching: options.promptCaching,
     autoCaching: options.autoCaching,
   });

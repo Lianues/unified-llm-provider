@@ -10,14 +10,28 @@ import {
   LLMRequest, LLMResponse, LLMStreamChunk, LLMCompactResponse, Part, Content, FunctionCallPart, FunctionResponsePart, ProviderContextItem,
   isVisibleTextPart, isInlineDataPart, isFunctionCallPart, isFunctionResponsePart, isTextPart, isProviderContextPart,
 } from '../../types.js';
+import type { LLMPromptCacheConfig, LLMPromptCacheMode } from '../../config/types.js';
 import { isSupportedToolResponseMimeType, isToolResponseImageMimeType, parseBase64DataUrl, toBase64DataUrl } from '../vision.js';
 import { CompactFormatAdapter, StreamDecodeState } from './types.js';
 import { consumeCallId, normalizeCallId, resolveCallId } from './tool-call-ids.js';
 import { sanitizeSchemaForOpenAI } from './schema-sanitizer.js';
 import { mapOpenAIResponsesThinkingLevel, normalizeReasoningMode } from './thinking-level.js';
 
+interface NormalizedOpenAIResponsesPromptCacheConfig {
+  enabled: boolean;
+  mode: LLMPromptCacheMode;
+  ttl: '30m';
+  breakpoints: {
+    messages: boolean;
+  };
+}
+
 export class OpenAIResponsesFormat implements CompactFormatAdapter {
-  constructor(private model: string) {}
+  private readonly promptCache: NormalizedOpenAIResponsesPromptCacheConfig;
+
+  constructor(private model: string, promptCache?: LLMPromptCacheConfig) {
+    this.promptCache = normalizeOpenAIResponsesPromptCacheConfig(promptCache);
+  }
 
   // ============ 编码请求：Gemini (Internal) → OpenAI Responses ============
 
@@ -159,6 +173,10 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
       }));
     }
 
+    if (this.promptCache.enabled) {
+      this.injectPromptCacheBreakpoints(body);
+    }
+
     if (request.generationConfig) {
       const gc = request.generationConfig;
       if (gc.maxOutputTokens !== undefined) body.max_output_tokens = gc.maxOutputTokens;
@@ -178,6 +196,14 @@ export class OpenAIResponsesFormat implements CompactFormatAdapter {
     if (stream) body.stream = true;
 
     return body;
+  }
+
+  private injectPromptCacheBreakpoints(body: Record<string, any>): void {
+    const inputItems = Array.isArray(body.input) ? body.input : [];
+    body.input = inputItems;
+    if (this.promptCache.breakpoints.messages && !markLastOpenAIResponsesCacheableBlockAtRequestEnd(inputItems)) {
+      inputItems.push(createOpenAICacheMarkerMessage(' '));
+    }
   }
 
   encodeCompactRequest(request: LLMRequest): unknown {
@@ -416,10 +442,12 @@ function getOpenAIResponsesRawItem(context: ProviderContextItem | undefined): an
 function mapOpenAIResponsesUsage(usage: any): LLMResponse['usageMetadata'] | undefined {
   if (!usage || typeof usage !== 'object') return undefined;
   const cached = usage.input_tokens_details?.cached_tokens ?? 0;
+  const cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? usage.cache_write_tokens ?? 0;
   const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
   return {
     promptTokenCount: usage.input_tokens,
     ...(cached > 0 ? { cachedContentTokenCount: cached } : {}),
+    ...(cacheWrite > 0 ? { cacheCreationInputTokenCount: cacheWrite } : {}),
     ...(typeof reasoningTokens === 'number' ? { thoughtsTokenCount: reasoningTokens } : {}),
     candidatesTokenCount: usage.output_tokens,
     totalTokenCount: usage.total_tokens,
@@ -441,6 +469,53 @@ function mapUsageToOpenAIResponsesWire(usage: LLMCompactResponse['usageMetadata'
     } : {}),
     total_tokens: usage.totalTokenCount ?? ((usage.promptTokenCount ?? 0) + (usage.candidatesTokenCount ?? 0)),
   };
+}
+
+function normalizeOpenAIResponsesPromptCacheConfig(promptCache: LLMPromptCacheConfig | undefined): NormalizedOpenAIResponsesPromptCacheConfig {
+  const breakpoints = promptCache?.breakpoints ?? {};
+  return {
+    enabled: promptCache?.enabled === true,
+    mode: promptCache?.mode === 'implicit' ? 'implicit' : 'explicit',
+    ttl: '30m',
+    breakpoints: {
+      messages: breakpoints.messages !== false,
+    },
+  };
+}
+
+function createOpenAIPromptCacheBreakpoint(): Record<string, string> {
+  return { mode: 'explicit' };
+}
+
+function createOpenAICacheMarkerMessage(text: string): Record<string, unknown> {
+  return {
+    type: 'message',
+    role: 'user',
+    content: [
+      {
+        type: 'input_text',
+        text,
+        prompt_cache_breakpoint: createOpenAIPromptCacheBreakpoint(),
+      },
+    ],
+  };
+}
+
+function markLastOpenAIResponsesCacheableBlockAtRequestEnd(inputItems: any[]): boolean {
+  if (inputItems.length === 0) return false;
+  const lastItem = inputItems[inputItems.length - 1];
+  const content = lastItem?.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  const lastBlock = content[content.length - 1];
+  if (!isOpenAIResponsesCacheableContentBlock(lastBlock)) return false;
+  lastBlock.prompt_cache_breakpoint = createOpenAIPromptCacheBreakpoint();
+  return true;
+}
+
+function isOpenAIResponsesCacheableContentBlock(block: unknown): block is Record<string, unknown> {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+  const type = (block as Record<string, unknown>).type;
+  return type === 'input_text' || type === 'input_image' || type === 'input_file';
 }
 
 function addInlineDataPart(parts: Part[], inlineData: ReturnType<typeof parseBase64DataUrl>, name?: unknown): void {
