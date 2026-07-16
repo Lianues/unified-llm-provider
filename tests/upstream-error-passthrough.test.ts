@@ -148,6 +148,48 @@ describe('upstream error passthrough', () => {
     expect(chunks[0].rawChunk).toEqual({ ...rawError, event: 'error' });
   });
 
+  it('可解析冒号后无空格的 Claude SSE，并保留 thinking 后续 text block', async () => {
+    const events = [
+      { type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '思考' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig_1' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '你好' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
+      { type: 'message_stop' },
+    ];
+    const bodyText = events
+      .map((event) => `event:${event.type}\ndata:${JSON.stringify(event)}\n\n`)
+      .join('');
+    const mockFetch = vi.fn(async () => new Response(bodyText, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }));
+
+    const provider = createClaudeProvider({
+      provider: 'claude',
+      model: 'claude-sonnet-4',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.anthropic.test/v1',
+      fetch: mockFetch as any,
+    });
+
+    const chunks: any[] = [];
+    for await (const chunk of provider.chatStream(request, {
+      inputFormat: 'unified',
+      outputFormat: 'unified',
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.some((chunk) => chunk.partsDelta?.[0]?.text === '思考' && chunk.partsDelta[0].thought === true)).toBe(true);
+    expect(chunks.some((chunk) => chunk.thoughtSignature === 'claude:sig_1' || chunk.partsDelta?.[0]?.thoughtSignature === 'claude:sig_1')).toBe(true);
+    expect(chunks.some((chunk) => chunk.textDelta === '你好')).toBe(true);
+  });
+
   it('SSE data 不是 JSON 时返回 stream_parse_error，保留 data 原文', async () => {
     const mockFetch = vi.fn(async () => new Response(
       'data: upstream plain text error\n\n',

@@ -260,7 +260,39 @@ async function* parseSSE(response: Response): AsyncGenerator<SSEChunk> {
   const decoder = new TextDecoder();
   let buffer = '';
   let currentEvent: string | undefined;
+  let dataLines: string[] = [];
   let chunksRead = 0;
+
+  const dispatch = (): SSEChunk | 'done' | undefined => {
+    const data = dataLines.join('\n');
+    const event = currentEvent;
+    dataLines = [];
+    currentEvent = undefined;
+
+    if (data === '[DONE]') return 'done';
+    return data ? { event, data } : undefined;
+  };
+
+  const handleLine = (rawLine: string): SSEChunk | 'done' | undefined => {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line === '') return dispatch();
+    if (line.startsWith(':')) return undefined; // SSE comment / heartbeat
+
+    const colonIndex = line.indexOf(':');
+    const field = colonIndex >= 0 ? line.slice(0, colonIndex) : line;
+    let value = colonIndex >= 0 ? line.slice(colonIndex + 1) : '';
+    // SSE 规范：冒号后可选一个空格。Anthropic 兼容端点可能发送 `data:{...}`，
+    // 也可能发送 `data: {...}`，两种都必须接受。
+    if (value.startsWith(' ')) value = value.slice(1);
+
+    if (field === 'event') {
+      const event = value.trim();
+      currentEvent = event || undefined;
+    } else if (field === 'data') {
+      dataLines.push(value);
+    }
+    return undefined;
+  };
 
   try {
     while (true) {
@@ -274,29 +306,24 @@ async function* parseSSE(response: Response): AsyncGenerator<SSEChunk> {
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('event: ')) {
-          currentEvent = trimmed.slice(7).trim();
-        } else if (trimmed.startsWith('data: ')) {
-          const data = trimmed.slice(6);
-          if (data === '[DONE]') return;
-          if (data) {
-            yield { event: currentEvent, data };
-            currentEvent = undefined; // data 是事件序列的结尾
-          }
-        } else if (trimmed === '') {
-          currentEvent = undefined; // 空行重置事件
-        }
+        const chunk = handleLine(line);
+        if (chunk === 'done') return;
+        if (chunk) yield chunk;
       }
     }
-    // 处理剩余 buffer
-    const trimmed = buffer.trim();
-    if (trimmed.startsWith('data: ')) {
-      const data = trimmed.slice(6);
-      if (data && data !== '[DONE]') {
-        yield { event: currentEvent, data };
+
+    buffer += decoder.decode();
+    if (buffer) {
+      const lines = buffer.split('\n');
+      for (const line of lines) {
+        const chunk = handleLine(line);
+        if (chunk === 'done') return;
+        if (chunk) yield chunk;
       }
     }
+
+    const chunk = dispatch();
+    if (chunk !== 'done' && chunk) yield chunk;
   } catch (err) {
     // 为连接中断错误补充上下文（已接收块数帮助判断是建连失败还是中途断开）
     const msg = err instanceof Error ? err.message : String(err);
