@@ -1,4 +1,5 @@
 export type FetchLike = typeof fetch;
+export type LLMTransportMode = 'http' | 'websocket';
 
 export interface LLMRequestDebugEvent {
   url: string;
@@ -35,6 +36,12 @@ export interface LLMEndpointOverride {
   url?: string;
   streamUrl?: string;
   compactUrl?: string;
+  /** OpenAI Responses WebSocket URL；未填时由 url/baseUrl 自动转换为 ws(s)。 */
+  webSocketUrl?: string;
+  /** 传输模式：默认 HTTP；OpenAI Responses 可选 WebSocket。 */
+  transport?: LLMTransportMode;
+  /** WebSocket continuation 会话隔离 key，避免不同对话复用同一 previous_response_id。 */
+  webSocketSessionKey?: string;
   headers?: Record<string, string>;
   /** 显式指定此 endpoint 使用的 HTTP/HTTPS 代理 */
   proxy?: LLMProxyOption;
@@ -102,6 +109,10 @@ export interface LLMConfig {
   promptCaching?: boolean;
   /** [Deprecated] [Claude] 顶层自动缓存 */
   autoCaching?: boolean;
+  /** 传输模式：默认 HTTP；OpenAI Responses 可选 WebSocket。 */
+  transport?: LLMTransportMode;
+  /** WebSocket continuation 会话隔离 key，避免不同对话复用同一 previous_response_id。 */
+  webSocketSessionKey?: string;
   /** 自定义 fetch 实现 */
   fetch?: FetchLike;
   /** 显式指定 HTTP/HTTPS 代理，例如 http://127.0.0.1:7890 */

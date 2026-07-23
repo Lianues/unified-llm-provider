@@ -5,7 +5,7 @@
  * 支持流式和非流式请求，通过 streamUrl 字段区分 URL。
  */
 
-import type { FetchLike, LLMDebugHooks, LLMProxyOption } from '../config/types.js';
+import type { FetchLike, LLMDebugHooks, LLMProxyOption, LLMTransportMode } from '../config/types.js';
 
 export interface EndpointConfig {
   /** 非流式请求 URL */
@@ -14,6 +14,12 @@ export interface EndpointConfig {
   streamUrl?: string;
   /** compact / compaction 请求 URL（可选） */
   compactUrl?: string;
+  /** WebSocket URL（OpenAI Responses WebSocket mode）。 */
+  webSocketUrl?: string;
+  /** 传输模式。默认 HTTP；OpenAI Responses 可选 WebSocket。 */
+  transport?: LLMTransportMode;
+  /** WebSocket continuation 会话隔离 key。 */
+  webSocketSessionKey?: string;
   /** 请求头（不含 Content-Type，内部自动加） */
   headers: Record<string, string>;
   /** 自定义 fetch 实现 */
@@ -132,7 +138,7 @@ async function loadProxyAgentConstructor(): Promise<ProxyAgentConstructor> {
   return proxyAgentConstructorPromise;
 }
 
-async function getProxyDispatcher(proxy?: LLMProxyOption): Promise<unknown | undefined> {
+export async function getProxyDispatcher(proxy?: LLMProxyOption): Promise<unknown | undefined> {
   const normalized = normalizeProxyOption(proxy);
   if (!normalized) return undefined;
 

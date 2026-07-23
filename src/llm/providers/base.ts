@@ -10,6 +10,7 @@ import { detectLLMRequestSignatureRepresentation } from '../../signatures/normal
 import { buildRequestTransport, sendRequest, type EndpointConfig } from '../transport.js';
 import type { LLMProxyOption } from '../../config/types.js';
 import { processResponse, processStreamResponse } from '../response.js';
+import { streamOpenAIResponsesWebSocket } from '../websocket-openai-responses.js';
 import type { FormatRegistry } from '../../registry/formats.js';
 import { bodyToCurlPayload, formatRequestAsCurl, type CurlFormatOptions } from '../debug-utils.js';
 import type { LLMCompactResponse } from '../../types/llm.js';
@@ -298,6 +299,26 @@ export class LLMProvider implements LLMProviderLike {
 
   async *chatStream<TOutput = LLMStreamChunk>(request: unknown, options?: LLMCallOptions): AsyncGenerator<TOutput> {
     const built = this.buildProviderRequest(request, options, true);
+
+    if (built.endpoint.transport === 'websocket' && this.providerFormat === 'openai-responses') {
+      for await (const chunk of streamOpenAIResponsesWebSocket({
+        endpoint: built.endpoint,
+        url: built.url,
+        headers: built.headers,
+        body: built.body,
+        format: this.format,
+        signal: options?.signal,
+      })) {
+        yield encodeStreamChunkToFormat(chunk, {
+          format: built.outputFormat,
+          sourceFormat: this.providerFormat,
+          registry: options?.formatRegistry,
+          signatureMode: this.resolveUnifiedSignatureMode(built.canonicalRequest, built.inputFormat, built.outputFormat),
+        }) as TOutput;
+      }
+      return;
+    }
+
     const res = await sendRequest(built.endpoint, built.body, true, options?.signal, this.loggingDir);
 
     for await (const chunk of processStreamResponse(res, this.format)) {
