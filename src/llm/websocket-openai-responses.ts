@@ -14,7 +14,6 @@ import type { FormatAdapter } from './formats/types.js';
 import { getProxyDispatcher, type EndpointConfig } from './transport.js';
 
 const OPENAI_RESPONSES_WS_MAX_AGE_MS = 55 * 60 * 1000;
-const OPENAI_RESPONSES_WS_DEBUG_PREFIX = '[OpenAIResponsesWS]';
 
 interface WebSocketSession {
   key: string;
@@ -67,73 +66,28 @@ export async function* streamOpenAIResponsesWebSocket(
   const release = await acquireSessionLock(session, options.signal);
 
   try {
-    logWebSocketDebug('request.begin', {
-      sessionKey: session.key,
-      hasSocket: !!session.socket,
-      socketOpen: isSocketOpen(session.socket),
-      hasPreviousResponseId: !!session.previousResponseId,
-      previousResponseId: session.previousResponseId,
-      cachedInputItemCount: session.serverInputItems?.length ?? 0,
-      fullInputItemCount: Array.isArray(fullBody.input) ? fullBody.input.length : 0,
-    });
-
     let allowIncremental = true;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const prepared = prepareCreatePayload(session, fullBody, allowIncremental);
       let completedResponse: unknown;
       let responseId = responseIdFromPayload(prepared.payload);
       let shouldRetryFull = false;
-      let lastEvent = '';
       const streamedReasoningSignatures: StreamedReasoningSignatureRecord[] = [];
-
-      logWebSocketDebug('request.decision', {
-        sessionKey: session.key,
-        attempt,
-        decision: prepared.decision,
-        decisionReason: prepared.decisionReason,
-        hasPreviousResponseId: !!session.previousResponseId,
-        previousResponseId: session.previousResponseId,
-        usedPreviousResponseId: prepared.usedPreviousResponseId,
-        cachedInputItemCount: session.serverInputItems?.length ?? 0,
-        fullInputItemCount: prepared.fullInputItems.length,
-        sentInputItemCount: inputItemCountFromPayload(prepared.payload),
-        baseSignatureMatched: session.baseSignature === prepared.baseSignature,
-      });
 
       const socket = await ensureOpenSocket(session, options, attempt > 0);
       const state = options.format.createStreamState();
 
       try {
         for await (const raw of sendCreateAndReadEvents(socket, prepared.payload, options.signal)) {
-          lastEvent = eventType(raw);
           captureStreamedReasoningSignature(raw, streamedReasoningSignatures);
-          const capturedResponseId = responseIdFromPayload(raw);
-          if (capturedResponseId && (capturedResponseId !== responseId || lastEvent === 'response.completed')) {
-            logWebSocketDebug('response.id_captured', {
-              sessionKey: session.key,
-              event: lastEvent,
-              responseId: capturedResponseId,
-            });
-          }
-          responseId = capturedResponseId ?? responseId;
+          responseId = responseIdFromPayload(raw) ?? responseId;
           completedResponse = completedResponseFromPayload(raw) ?? completedResponse;
 
           if (isProviderErrorPayload(raw)) {
-            logWebSocketDebug('response.error', {
-              sessionKey: session.key,
-              event: lastEvent,
-              errorCode: errorCode(raw),
-              usedPreviousResponseId: prepared.usedPreviousResponseId,
-              recoverable: isRecoverableContinuationError(raw),
-            });
-            if (prepared.usedPreviousResponseId) invalidateSessionState(session, 'provider_error_after_continuation');
+            if (prepared.usedPreviousResponseId) invalidateSessionState(session);
             if (isRecoverableContinuationError(raw) && attempt === 0) {
               shouldRetryFull = true;
               allowIncremental = false;
-              logWebSocketDebug('request.retry_full', {
-                sessionKey: session.key,
-                reason: errorCode(raw) ?? 'recoverable_continuation_error',
-              });
               closeSessionSocket(session);
               break;
             }
@@ -152,11 +106,6 @@ export async function* streamOpenAIResponsesWebSocket(
           }
         }
       } catch (err) {
-        logWebSocketDebug('response.read_failed', {
-          sessionKey: session.key,
-          lastEvent,
-          error: stringifyError(err),
-        });
         closeSessionSocket(session);
         if (isAbortError(options.signal, err)) throw err;
         yield createErrorStreamChunk({
@@ -170,12 +119,6 @@ export async function* streamOpenAIResponsesWebSocket(
 
       if (responseId) {
         updateSessionAfterComplete(session, options.format, prepared, responseId, completedResponse, streamedReasoningSignatures);
-      } else {
-        logWebSocketDebug('response.id_missing', {
-          sessionKey: session.key,
-          lastEvent,
-          completedResponseSeen: completedResponse !== undefined,
-        });
       }
       session.connectedAt = session.connectedAt ?? Date.now();
       return;
@@ -267,15 +210,6 @@ function updateSessionAfterComplete(
   session.previousResponseId = responseId;
   session.serverInputItems = [...prepared.fullInputItems, ...responseInputItems];
   session.baseSignature = prepared.baseSignature;
-  logWebSocketDebug('session.updated', {
-    sessionKey: session.key,
-    previousResponseId: session.previousResponseId,
-    requestInputItemCount: prepared.fullInputItems.length,
-    responseInputItemCount: responseInputItems.length,
-    cachedInputItemCount: session.serverInputItems.length,
-    completedResponseSeen: completedResponse !== undefined,
-    streamedReasoningSignatureCount: streamedReasoningSignatures.filter((record) => !!record.encryptedContent).length,
-  });
 }
 
 function encodeResponseAsInputItems(
@@ -469,19 +403,10 @@ function sessionFor(endpoint: EndpointConfig, url: string, headers: Record<strin
   const configured = endpoint.webSocketSessionKey?.trim();
   const key = configured || `stateless:${++statelessSessionCounter}:${url}:${headers.authorization ?? headers.Authorization ?? ''}`;
   let session = sessions.get(key);
-  const reused = !!session;
   if (!session) {
     session = { key };
     sessions.set(key, session);
   }
-  logWebSocketDebug('session.resolve', {
-    sessionKey: key,
-    configured: !!configured,
-    reused,
-    hasPreviousResponseId: !!session.previousResponseId,
-    previousResponseId: session.previousResponseId,
-    cachedInputItemCount: session.serverInputItems?.length ?? 0,
-  });
   return session;
 }
 
@@ -564,13 +489,7 @@ function closeSessionSocket(session: WebSocketSession): void {
   try { socket.close(); } catch { /* noop */ }
 }
 
-function invalidateSessionState(session: WebSocketSession, reason = 'unspecified'): void {
-  logWebSocketDebug('session.invalidated', {
-    sessionKey: session.key,
-    reason,
-    previousResponseId: session.previousResponseId,
-    cachedInputItemCount: session.serverInputItems?.length ?? 0,
-  });
+function invalidateSessionState(session: WebSocketSession): void {
   session.previousResponseId = undefined;
   session.serverInputItems = undefined;
   session.baseSignature = undefined;
@@ -578,14 +497,6 @@ function invalidateSessionState(session: WebSocketSession, reason = 'unspecified
 
 function isSocketOpen(socket: WebSocket | undefined): boolean {
   return !!socket && socket.readyState === WebSocket.OPEN;
-}
-
-function inputItemCountFromPayload(payload: Record<string, unknown>): number {
-  return Array.isArray(payload.input) ? payload.input.length : 0;
-}
-
-function logWebSocketDebug(event: string, details: Record<string, unknown>): void {
-  console.info(OPENAI_RESPONSES_WS_DEBUG_PREFIX, event, details);
 }
 
 function webSocketHeaders(headers: Record<string, string>): Record<string, string> {
