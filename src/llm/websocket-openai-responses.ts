@@ -14,6 +14,7 @@ import type { FormatAdapter } from './formats/types.js';
 import { getProxyDispatcher, type EndpointConfig } from './transport.js';
 
 const OPENAI_RESPONSES_WS_MAX_AGE_MS = 55 * 60 * 1000;
+const OPENAI_RESPONSES_WS_DEBUG_PREFIX = '[OpenAIResponsesWS]';
 
 interface WebSocketSession {
   key: string;
@@ -32,6 +33,12 @@ interface PreparedCreatePayload {
   decision: 'full' | 'incremental';
   decisionReason: string;
   usedPreviousResponseId?: string;
+}
+
+export interface StreamedReasoningSignatureRecord {
+  itemId?: string;
+  outputIndex?: number;
+  encryptedContent?: string;
 }
 
 export interface OpenAIResponsesWebSocketStreamOptions {
@@ -60,26 +67,73 @@ export async function* streamOpenAIResponsesWebSocket(
   const release = await acquireSessionLock(session, options.signal);
 
   try {
+    logWebSocketDebug('request.begin', {
+      sessionKey: session.key,
+      hasSocket: !!session.socket,
+      socketOpen: isSocketOpen(session.socket),
+      hasPreviousResponseId: !!session.previousResponseId,
+      previousResponseId: session.previousResponseId,
+      cachedInputItemCount: session.serverInputItems?.length ?? 0,
+      fullInputItemCount: Array.isArray(fullBody.input) ? fullBody.input.length : 0,
+    });
+
     let allowIncremental = true;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const prepared = prepareCreatePayload(session, fullBody, allowIncremental);
       let completedResponse: unknown;
       let responseId = responseIdFromPayload(prepared.payload);
       let shouldRetryFull = false;
+      let lastEvent = '';
+      const streamedReasoningSignatures: StreamedReasoningSignatureRecord[] = [];
+
+      logWebSocketDebug('request.decision', {
+        sessionKey: session.key,
+        attempt,
+        decision: prepared.decision,
+        decisionReason: prepared.decisionReason,
+        hasPreviousResponseId: !!session.previousResponseId,
+        previousResponseId: session.previousResponseId,
+        usedPreviousResponseId: prepared.usedPreviousResponseId,
+        cachedInputItemCount: session.serverInputItems?.length ?? 0,
+        fullInputItemCount: prepared.fullInputItems.length,
+        sentInputItemCount: inputItemCountFromPayload(prepared.payload),
+        baseSignatureMatched: session.baseSignature === prepared.baseSignature,
+      });
 
       const socket = await ensureOpenSocket(session, options, attempt > 0);
       const state = options.format.createStreamState();
 
       try {
         for await (const raw of sendCreateAndReadEvents(socket, prepared.payload, options.signal)) {
-          responseId = responseIdFromPayload(raw) ?? responseId;
+          lastEvent = eventType(raw);
+          captureStreamedReasoningSignature(raw, streamedReasoningSignatures);
+          const capturedResponseId = responseIdFromPayload(raw);
+          if (capturedResponseId && (capturedResponseId !== responseId || lastEvent === 'response.completed')) {
+            logWebSocketDebug('response.id_captured', {
+              sessionKey: session.key,
+              event: lastEvent,
+              responseId: capturedResponseId,
+            });
+          }
+          responseId = capturedResponseId ?? responseId;
           completedResponse = completedResponseFromPayload(raw) ?? completedResponse;
 
           if (isProviderErrorPayload(raw)) {
-            if (prepared.usedPreviousResponseId) invalidateSessionState(session);
+            logWebSocketDebug('response.error', {
+              sessionKey: session.key,
+              event: lastEvent,
+              errorCode: errorCode(raw),
+              usedPreviousResponseId: prepared.usedPreviousResponseId,
+              recoverable: isRecoverableContinuationError(raw),
+            });
+            if (prepared.usedPreviousResponseId) invalidateSessionState(session, 'provider_error_after_continuation');
             if (isRecoverableContinuationError(raw) && attempt === 0) {
               shouldRetryFull = true;
               allowIncremental = false;
+              logWebSocketDebug('request.retry_full', {
+                sessionKey: session.key,
+                reason: errorCode(raw) ?? 'recoverable_continuation_error',
+              });
               closeSessionSocket(session);
               break;
             }
@@ -98,6 +152,11 @@ export async function* streamOpenAIResponsesWebSocket(
           }
         }
       } catch (err) {
+        logWebSocketDebug('response.read_failed', {
+          sessionKey: session.key,
+          lastEvent,
+          error: stringifyError(err),
+        });
         closeSessionSocket(session);
         if (isAbortError(options.signal, err)) throw err;
         yield createErrorStreamChunk({
@@ -110,7 +169,13 @@ export async function* streamOpenAIResponsesWebSocket(
       if (shouldRetryFull) continue;
 
       if (responseId) {
-        updateSessionAfterComplete(session, options.format, prepared, responseId, completedResponse);
+        updateSessionAfterComplete(session, options.format, prepared, responseId, completedResponse, streamedReasoningSignatures);
+      } else {
+        logWebSocketDebug('response.id_missing', {
+          sessionKey: session.key,
+          lastEvent,
+          completedResponseSeen: completedResponse !== undefined,
+        });
       }
       session.connectedAt = session.connectedAt ?? Date.now();
       return;
@@ -194,16 +259,33 @@ function updateSessionAfterComplete(
   prepared: PreparedCreatePayload,
   responseId: string,
   completedResponse: unknown,
+  streamedReasoningSignatures: readonly StreamedReasoningSignatureRecord[],
 ): void {
-  const responseInputItems = completedResponse ? encodeResponseAsInputItems(format, completedResponse) : [];
+  const responseInputItems = completedResponse
+    ? encodeResponseAsInputItems(format, completedResponse, streamedReasoningSignatures)
+    : [];
   session.previousResponseId = responseId;
   session.serverInputItems = [...prepared.fullInputItems, ...responseInputItems];
   session.baseSignature = prepared.baseSignature;
+  logWebSocketDebug('session.updated', {
+    sessionKey: session.key,
+    previousResponseId: session.previousResponseId,
+    requestInputItemCount: prepared.fullInputItems.length,
+    responseInputItemCount: responseInputItems.length,
+    cachedInputItemCount: session.serverInputItems.length,
+    completedResponseSeen: completedResponse !== undefined,
+    streamedReasoningSignatureCount: streamedReasoningSignatures.filter((record) => !!record.encryptedContent).length,
+  });
 }
 
-function encodeResponseAsInputItems(format: FormatAdapter, rawResponse: unknown): unknown[] {
+function encodeResponseAsInputItems(
+  format: FormatAdapter,
+  rawResponse: unknown,
+  streamedReasoningSignatures: readonly StreamedReasoningSignatureRecord[],
+): unknown[] {
+  const streamCompatibleResponse = normalizeCompletedResponseForStreamSignatures(rawResponse, streamedReasoningSignatures);
   try {
-    const decoded = format.decodeResponse(rawResponse) as LLMResponse;
+    const decoded = format.decodeResponse(streamCompatibleResponse) as LLMResponse;
     const request: LLMRequest = { contents: [decoded.content] };
     const encoded = format.encodeRequest(request, false);
     if (isPlainObject(encoded) && Array.isArray(encoded.input)) return encoded.input.map(stripWebSocketOnlyInputFields);
@@ -211,8 +293,61 @@ function encodeResponseAsInputItems(format: FormatAdapter, rawResponse: unknown)
     // Fall back to raw response.output below.
   }
 
-  if (isPlainObject(rawResponse) && Array.isArray(rawResponse.output)) return rawResponse.output.map(stripWebSocketOnlyInputFields);
+  if (isPlainObject(streamCompatibleResponse) && Array.isArray(streamCompatibleResponse.output)) {
+    return streamCompatibleResponse.output.map(stripWebSocketOnlyInputFields);
+  }
   return [];
+}
+
+function captureStreamedReasoningSignature(
+  payload: unknown,
+  records: StreamedReasoningSignatureRecord[],
+): void {
+  if (!isPlainObject(payload) || eventType(payload) !== 'response.output_item.done') return;
+  const item = payload.item;
+  if (!isPlainObject(item) || item.type !== 'reasoning') return;
+
+  const itemId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : undefined;
+  const outputIndex = typeof payload.output_index === 'number' && Number.isInteger(payload.output_index)
+    ? payload.output_index
+    : undefined;
+  const encryptedContent = typeof item.encrypted_content === 'string' && item.encrypted_content
+    ? item.encrypted_content
+    : undefined;
+  const next: StreamedReasoningSignatureRecord = {
+    ...(itemId ? { itemId } : {}),
+    ...(outputIndex !== undefined ? { outputIndex } : {}),
+    ...(encryptedContent ? { encryptedContent } : {}),
+  };
+  const existingIndex = records.findIndex((record) =>
+    (itemId !== undefined && record.itemId === itemId)
+    || (outputIndex !== undefined && record.outputIndex === outputIndex));
+  if (existingIndex >= 0) records[existingIndex] = next;
+  else records.push(next);
+}
+
+export function normalizeCompletedResponseForStreamSignatures(
+  rawResponse: unknown,
+  streamedReasoningSignatures: readonly StreamedReasoningSignatureRecord[],
+): unknown {
+  if (!isPlainObject(rawResponse) || !Array.isArray(rawResponse.output)) return rawResponse;
+
+  let reasoningOrdinal = 0;
+  const output = rawResponse.output.map((rawItem, outputIndex) => {
+    if (!isPlainObject(rawItem) || rawItem.type !== 'reasoning') return rawItem;
+    const itemId = typeof rawItem.id === 'string' && rawItem.id.trim() ? rawItem.id.trim() : undefined;
+    const matched = streamedReasoningSignatures.find((record) => itemId !== undefined && record.itemId === itemId)
+      ?? streamedReasoningSignatures.find((record) => record.outputIndex === outputIndex)
+      ?? streamedReasoningSignatures[reasoningOrdinal];
+    reasoningOrdinal += 1;
+
+    const normalized: Record<string, unknown> = { ...rawItem };
+    delete normalized.encrypted_content;
+    if (matched?.encryptedContent) normalized.encrypted_content = matched.encryptedContent;
+    return normalized;
+  });
+
+  return { ...rawResponse, output };
 }
 
 async function ensureOpenSocket(
@@ -334,10 +469,19 @@ function sessionFor(endpoint: EndpointConfig, url: string, headers: Record<strin
   const configured = endpoint.webSocketSessionKey?.trim();
   const key = configured || `stateless:${++statelessSessionCounter}:${url}:${headers.authorization ?? headers.Authorization ?? ''}`;
   let session = sessions.get(key);
+  const reused = !!session;
   if (!session) {
     session = { key };
     sessions.set(key, session);
   }
+  logWebSocketDebug('session.resolve', {
+    sessionKey: key,
+    configured: !!configured,
+    reused,
+    hasPreviousResponseId: !!session.previousResponseId,
+    previousResponseId: session.previousResponseId,
+    cachedInputItemCount: session.serverInputItems?.length ?? 0,
+  });
   return session;
 }
 
@@ -420,7 +564,13 @@ function closeSessionSocket(session: WebSocketSession): void {
   try { socket.close(); } catch { /* noop */ }
 }
 
-function invalidateSessionState(session: WebSocketSession): void {
+function invalidateSessionState(session: WebSocketSession, reason = 'unspecified'): void {
+  logWebSocketDebug('session.invalidated', {
+    sessionKey: session.key,
+    reason,
+    previousResponseId: session.previousResponseId,
+    cachedInputItemCount: session.serverInputItems?.length ?? 0,
+  });
   session.previousResponseId = undefined;
   session.serverInputItems = undefined;
   session.baseSignature = undefined;
@@ -428,6 +578,14 @@ function invalidateSessionState(session: WebSocketSession): void {
 
 function isSocketOpen(socket: WebSocket | undefined): boolean {
   return !!socket && socket.readyState === WebSocket.OPEN;
+}
+
+function inputItemCountFromPayload(payload: Record<string, unknown>): number {
+  return Array.isArray(payload.input) ? payload.input.length : 0;
+}
+
+function logWebSocketDebug(event: string, details: Record<string, unknown>): void {
+  console.info(OPENAI_RESPONSES_WS_DEBUG_PREFIX, event, details);
 }
 
 function webSocketHeaders(headers: Record<string, string>): Record<string, string> {
@@ -535,14 +693,47 @@ function isProviderErrorPayload(payload: unknown): boolean {
 
 function errorInfoFromPayload(payload: unknown, rawChunk: unknown): LLMRawErrorInfo {
   const record = isPlainObject(payload) ? payload : { data: payload };
+  const status = numericField(record.status) ?? numericField(record.status_code);
+  const message = nestedPayloadMessage(record);
   return {
     kind: 'stream_error',
     rawChunk,
     event: eventType(payload) || undefined,
-    ...(typeof record.status === 'number' ? { status: record.status } : {}),
-    ...(typeof record.message === 'string' ? { message: record.message } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(isPlainObject(record.headers) ? { headers: record.headers as Record<string, string> } : {}),
+    ...(message ? { message } : {}),
     rawBody: payload,
   };
+}
+
+function nestedPayloadMessage(value: unknown): string | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const direct = value.message;
+  if (typeof direct === 'string' && direct.trim() && !isGenericErrorLabel(direct)) return direct.trim();
+  const error = value.error;
+  if (isPlainObject(error)) {
+    const message = error.message;
+    if (typeof message === 'string' && message.trim() && !isGenericErrorLabel(message)) return message.trim();
+  }
+  const response = value.response;
+  if (isPlainObject(response)) return nestedPayloadMessage(response);
+  return undefined;
+}
+
+function numericField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function isGenericErrorLabel(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'stream_error'
+    || normalized === 'upstream_error'
+    || normalized === 'http_error'
+    || normalized === 'response_error'
+    || normalized === 'decode_error'
+    || normalized === 'stream_read_error'
+    || normalized === 'stream_parse_error'
+    || normalized === 'llm_error';
 }
 
 function createErrorPayload(kind: LLMRawErrorInfo['kind'], message: string, rawChunk: unknown): Record<string, unknown> {
