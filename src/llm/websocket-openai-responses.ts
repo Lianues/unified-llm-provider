@@ -352,7 +352,7 @@ async function* sendCreateAndReadEvents(
   payload: Record<string, unknown>,
   signal?: AbortSignal,
 ): AsyncGenerator<unknown> {
-  const queue = createAsyncQueue<unknown>();
+  const queue = createAsyncQueue<unknown>(mergeOpenAIResponsesWebSocketEvents);
   let terminalSeen = false;
 
   const cleanup = () => {
@@ -440,7 +440,9 @@ function waitWithAbort(promise: Promise<void>, signal?: AbortSignal): Promise<vo
   });
 }
 
-function createAsyncQueue<T>(): AsyncIterable<T> & { push(value: T): void; end(): void; fail(error: unknown): void } {
+function createAsyncQueue<T>(
+  mergeQueued?: (previous: T, next: T) => T | undefined,
+): AsyncIterable<T> & { push(value: T): void; end(): void; fail(error: unknown): void } {
   const items: QueuedMessage[] = [];
   const waiters: Array<(item: QueuedMessage) => void> = [];
   let closed = false;
@@ -454,6 +456,16 @@ function createAsyncQueue<T>(): AsyncIterable<T> & { push(value: T): void; end()
   return {
     push(value: T) {
       if (closed) return;
+      if (mergeQueued && waiters.length === 0) {
+        const previous = items[items.length - 1];
+        if (previous && !previous.done && previous.error === undefined) {
+          const merged = mergeQueued(previous.value as T, value);
+          if (merged !== undefined) {
+            previous.value = merged;
+            return;
+          }
+        }
+      }
       emit({ value });
     },
     end() {
@@ -474,6 +486,36 @@ function createAsyncQueue<T>(): AsyncIterable<T> & { push(value: T): void; end()
         yield item.value as T;
       }
     },
+  };
+}
+
+const MERGEABLE_OPENAI_RESPONSES_WS_DELTA_EVENTS = new Set([
+  'response.output_text.delta',
+  'response.reasoning_summary_text.delta',
+  'response.reasoning_text.delta',
+  'response.reasoning.delta',
+  'response.function_call_arguments.delta',
+]);
+const OPENAI_RESPONSES_WS_DELTA_IDENTITY_FIELDS = [
+  'response_id',
+  'item_id',
+  'output_index',
+  'content_index',
+  'summary_index',
+] as const;
+
+export function mergeOpenAIResponsesWebSocketEvents(previous: unknown, next: unknown): unknown | undefined {
+  if (!isPlainObject(previous) || !isPlainObject(next)) return undefined;
+  const type = eventType(previous);
+  if (!type || type !== eventType(next) || !MERGEABLE_OPENAI_RESPONSES_WS_DELTA_EVENTS.has(type)) return undefined;
+  if (typeof previous.delta !== 'string' || typeof next.delta !== 'string') return undefined;
+  for (const field of OPENAI_RESPONSES_WS_DELTA_IDENTITY_FIELDS) {
+    if (previous[field] !== next[field]) return undefined;
+  }
+  return {
+    ...previous,
+    ...next,
+    delta: previous.delta + next.delta,
   };
 }
 
