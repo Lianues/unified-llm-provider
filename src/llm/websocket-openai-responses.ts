@@ -8,10 +8,12 @@
  * longer matches the connection-local state.
  */
 
-import { WebSocket } from 'undici';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import WebSocket, { type RawData } from 'ws';
+import type { LLMProxyOption } from '../config/types.js';
 import type { LLMRawErrorInfo, LLMRequest, LLMResponse, LLMStreamChunk } from '../types.js';
 import type { FormatAdapter } from './formats/types.js';
-import { getProxyDispatcher, type EndpointConfig } from './transport.js';
+import type { EndpointConfig } from './transport.js';
 
 const OPENAI_RESPONSES_WS_MAX_AGE_MS = 55 * 60 * 1000;
 
@@ -56,6 +58,7 @@ interface QueuedMessage {
 }
 
 const sessions = new Map<string, WebSocketSession>();
+const webSocketProxyAgents = new Map<string, HttpsProxyAgent<string>>();
 let statelessSessionCounter = 0;
 
 export async function* streamOpenAIResponsesWebSocket(
@@ -302,7 +305,7 @@ async function ensureOpenSocket(
 async function openSocket(options: OpenAIResponsesWebSocketStreamOptions): Promise<WebSocket> {
   const wsUrl = toWebSocketUrl(options.endpoint.webSocketUrl ?? options.url);
   const headers = webSocketHeaders(options.headers);
-  const dispatcher = await getProxyDispatcher(options.endpoint.proxy);
+  const agent = webSocketProxyAgent(options.endpoint.proxy);
 
   return new Promise<WebSocket>((resolve, reject) => {
     if (options.signal?.aborted) {
@@ -313,14 +316,19 @@ async function openSocket(options: OpenAIResponsesWebSocketStreamOptions): Promi
     let settled = false;
     const ws = new WebSocket(wsUrl, {
       headers,
-      ...(dispatcher ? { dispatcher: dispatcher as never } : {}),
+      // 小 delta 帧启用 permessage-deflate 后会在 VS Code Extension Host 中逐帧异步解压，
+      // 即使 TCP 数据已经全部到达，也可能形成约 200ms/帧的派发节拍。
+      perMessageDeflate: false,
+      ...(agent ? { agent } : {}),
+      // 与现有显式代理调试能力保持一致，允许抓包代理替换目标站点证书。
+      rejectUnauthorized: options.endpoint.proxy ? false : undefined,
     });
 
     const cleanup = () => {
       options.signal?.removeEventListener('abort', onAbort);
-      ws.removeEventListener('open', onOpen as never);
-      ws.removeEventListener('error', onError as never);
-      ws.removeEventListener('close', onClose as never);
+      ws.off('open', onOpen);
+      ws.off('error', onError);
+      ws.off('close', onClose);
     };
     const finishResolve = () => {
       if (settled) return;
@@ -337,13 +345,15 @@ async function openSocket(options: OpenAIResponsesWebSocketStreamOptions): Promi
     };
     const onAbort = () => finishReject(errorFromAbortSignal(options.signal!));
     const onOpen = () => finishResolve();
-    const onError = (event: Event) => finishReject(errorFromEvent(event));
-    const onClose = (event: CloseEvent) => finishReject(new Error(`OpenAI Responses WebSocket closed before open: ${event.code} ${event.reason}`.trim()));
+    const onError = (error: Error) => finishReject(error);
+    const onClose = (code: number, reason: Buffer) => finishReject(
+      new Error(`OpenAI Responses WebSocket closed before open: ${code} ${reason.toString('utf8')}`.trim()),
+    );
 
     options.signal?.addEventListener('abort', onAbort, { once: true });
-    ws.addEventListener('open', onOpen as never, { once: true });
-    ws.addEventListener('error', onError as never, { once: true });
-    ws.addEventListener('close', onClose as never, { once: true });
+    ws.once('open', onOpen);
+    ws.once('error', onError);
+    ws.once('close', onClose);
   });
 }
 
@@ -357,9 +367,9 @@ async function* sendCreateAndReadEvents(
 
   const cleanup = () => {
     signal?.removeEventListener('abort', onAbort);
-    socket.removeEventListener('message', onMessage as never);
-    socket.removeEventListener('error', onError as never);
-    socket.removeEventListener('close', onClose as never);
+    socket.off('message', onMessage);
+    socket.off('error', onError);
+    socket.off('close', onClose);
   };
   const finish = () => {
     terminalSeen = true;
@@ -369,27 +379,27 @@ async function* sendCreateAndReadEvents(
     try { socket.close(); } catch { /* noop */ }
     queue.fail(errorFromAbortSignal(signal!));
   };
-  const onMessage = (event: MessageEvent) => {
-    const parsed = parseWebSocketData(event.data);
+  const onMessage = (data: RawData) => {
+    const parsed = parseWebSocketData(data);
     if (!parsed.ok) {
-      queue.push(createErrorPayload('stream_parse_error', parsed.error.message, event.data));
+      queue.push(createErrorPayload('stream_parse_error', parsed.error.message, data));
       finish();
       return;
     }
     queue.push(parsed.value);
     if (isTerminalEvent(parsed.value)) finish();
   };
-  const onError = (event: Event) => queue.fail(errorFromEvent(event));
-  const onClose = (event: CloseEvent) => {
+  const onError = (error: Error) => queue.fail(error);
+  const onClose = (code: number, reason: Buffer) => {
     if (terminalSeen) return;
-    queue.fail(new Error(`OpenAI Responses WebSocket closed: ${event.code} ${event.reason}`.trim()));
+    queue.fail(new Error(`OpenAI Responses WebSocket closed: ${code} ${reason.toString('utf8')}`.trim()));
   };
 
   if (signal?.aborted) throw errorFromAbortSignal(signal);
   signal?.addEventListener('abort', onAbort, { once: true });
-  socket.addEventListener('message', onMessage as never);
-  socket.addEventListener('error', onError as never, { once: true });
-  socket.addEventListener('close', onClose as never, { once: true });
+  socket.on('message', onMessage);
+  socket.once('error', onError);
+  socket.once('close', onClose);
 
   try {
     socket.send(JSON.stringify(payload));
@@ -459,9 +469,9 @@ function createAsyncQueue<T>(
       if (mergeQueued && waiters.length === 0) {
         const previous = items[items.length - 1];
         if (previous && !previous.done && previous.error === undefined) {
-          const merged = mergeQueued(previous.value as T, value);
-          if (merged !== undefined) {
-            previous.value = merged;
+          const mergedValue = mergeQueued(previous.value as T, value);
+          if (mergedValue !== undefined) {
+            previous.value = mergedValue;
             return;
           }
         }
@@ -504,11 +514,15 @@ const OPENAI_RESPONSES_WS_DELTA_IDENTITY_FIELDS = [
   'summary_index',
 ] as const;
 
+function isMergeableOpenAIResponsesWebSocketDelta(value: unknown): value is Record<string, unknown> & { delta: string } {
+  if (!isPlainObject(value)) return false;
+  return MERGEABLE_OPENAI_RESPONSES_WS_DELTA_EVENTS.has(eventType(value)) && typeof value.delta === 'string';
+}
+
 export function mergeOpenAIResponsesWebSocketEvents(previous: unknown, next: unknown): unknown | undefined {
-  if (!isPlainObject(previous) || !isPlainObject(next)) return undefined;
+  if (!isMergeableOpenAIResponsesWebSocketDelta(previous) || !isMergeableOpenAIResponsesWebSocketDelta(next)) return undefined;
   const type = eventType(previous);
-  if (!type || type !== eventType(next) || !MERGEABLE_OPENAI_RESPONSES_WS_DELTA_EVENTS.has(type)) return undefined;
-  if (typeof previous.delta !== 'string' || typeof next.delta !== 'string') return undefined;
+  if (!type || type !== eventType(next)) return undefined;
   for (const field of OPENAI_RESPONSES_WS_DELTA_IDENTITY_FIELDS) {
     if (previous[field] !== next[field]) return undefined;
   }
@@ -551,6 +565,26 @@ function webSocketHeaders(headers: Record<string, string>): Record<string, strin
   return result;
 }
 
+function webSocketProxyAgent(proxy?: LLMProxyOption): HttpsProxyAgent<string> | undefined {
+  if (!proxy) return undefined;
+  const uri = (typeof proxy === 'string' ? proxy : proxy.url).trim();
+  if (!uri) return undefined;
+  const headers = typeof proxy === 'string' ? undefined : proxy.headers;
+  const sortedHeaders = headers
+    ? Object.fromEntries(Object.entries(headers).sort(([left], [right]) => left.localeCompare(right)))
+    : undefined;
+  const cacheKey = JSON.stringify({ uri, headers: sortedHeaders });
+  const cached = webSocketProxyAgents.get(cacheKey);
+  if (cached) return cached;
+
+  const agent = new HttpsProxyAgent(uri, {
+    ...(headers ? { headers } : {}),
+    rejectUnauthorized: false,
+  });
+  webSocketProxyAgents.set(cacheKey, agent);
+  return agent;
+}
+
 function toWebSocketUrl(url: string): string {
   const parsed = new URL(url);
   if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
@@ -582,6 +616,9 @@ function stableStringify(value: unknown): string {
 function parseWebSocketData(data: unknown): { ok: true; value: unknown } | { ok: false; error: Error } {
   try {
     if (typeof data === 'string') return { ok: true, value: JSON.parse(data) };
+    if (Array.isArray(data) && data.every((part) => Buffer.isBuffer(part))) {
+      return { ok: true, value: JSON.parse(Buffer.concat(data).toString('utf8')) };
+    }
     if (data instanceof ArrayBuffer) return { ok: true, value: JSON.parse(new TextDecoder().decode(data)) };
     if (ArrayBuffer.isView(data)) return { ok: true, value: JSON.parse(new TextDecoder().decode(data)) };
     return { ok: true, value: JSON.parse(String(data)) };
@@ -719,13 +756,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function stringifyError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-}
-
-function errorFromEvent(event: Event): Error {
-  const maybe = event as Event & { error?: unknown; message?: unknown };
-  if (maybe.error instanceof Error) return maybe.error;
-  if (typeof maybe.message === 'string' && maybe.message) return new Error(maybe.message);
-  return new Error(event.type || 'WebSocket error');
 }
 
 function errorFromAbortSignal(signal: AbortSignal): Error {

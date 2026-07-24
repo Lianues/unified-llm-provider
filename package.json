@@ -1,6 +1,6 @@
 {
   "name": "unified-llm-provider",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "统一 LLM Provider npm 包：一套统一结构接入 Gemini / Claude / OpenAI Compatible / OpenAI Responses / DeepSeek",
   "license": "MIT",
   "type": "module",
@@ -48,10 +48,13 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "undici": "^6.26.0"
+    "https-proxy-agent": "^9.1.0",
+    "undici": "^6.26.0",
+    "ws": "^8.21.1"
   }
 }
